@@ -791,8 +791,8 @@ def build_tree(matched, all_procs, sort_key, reverse=True):
 
 
 def _group_siblings(children):
-    """Group sibling nodes that share the same short command name into a single
-    synthetic node. Only groups when there are 2+ siblings with the same name."""
+    """Group sibling nodes that share the same short command name into a
+    synthetic parent with the original members as its children."""
     if len(children) <= 1:
         return children
     from collections import OrderedDict
@@ -806,19 +806,12 @@ def _group_siblings(children):
         if len(members) == 1:
             result.append(members[0])
             continue
-        # Create a synthetic group node from the first member
+        # Create a synthetic parent; the real processes become its children
         leader = members[0]
         group = {**leader}
-        group["command"] = leader["command"]  # keep original command
-        group["_group_name"] = name
-        group["_group_count"] = len(members)
-        group["pid"] = leader["pid"]  # use first PID for selection/expand
-        group["_group_pids"] = [m["pid"] for m in members]
-        # Merge all members' children into the group
-        merged_children = []
-        for m in members:
-            merged_children.extend(m.get("children", []))
-        group["children"] = merged_children
+        group["command"] = leader["command"]
+        group["pid"] = leader["pid"]  # use first PID for expand/collapse
+        group["children"] = members    # original members are now children
         # Recompute aggregates across all members
         group["rss_kb"] = sum(m["rss_kb"] for m in members)
         group["cpu"] = sum(m["cpu"] for m in members)
@@ -828,7 +821,7 @@ def _group_siblings(children):
         group["agg_cpu"] = sum(m.get("agg_cpu", m["cpu"]) for m in members)
         group["agg_cpu_ticks"] = sum(m.get("agg_cpu_ticks", m["cpu_ticks"]) for m in members)
         group["agg_threads"] = sum(m.get("agg_threads", m["threads"]) for m in members)
-        group["agg_forks"] = sum(m.get("agg_forks", 0) for m in members)
+        group["agg_forks"] = len(members) + sum(m.get("agg_forks", 0) for m in members)
         group["agg_net_in"] = sum(m.get("agg_net_in", 0) for m in members)
         group["agg_net_out"] = sum(m.get("agg_net_out", 0) for m in members)
         group["agg_bytes_in"] = sum(m.get("agg_bytes_in", 0) for m in members)
@@ -881,6 +874,8 @@ class ProcMonUI:
         self.stdscr = stdscr
         self.name = name
         self.patterns = [p.strip().lower() for p in name.split(",") if p.strip()] if name else []
+        self.exclude_name = ""
+        self.exclude_patterns = []
         self.interval = interval
         self.skip_fd = skip_fd
         self.selected = 0
@@ -1051,7 +1046,8 @@ class ProcMonUI:
             p["bytes_out"] = snap[1] if snap else 0
 
         matched = [p for p in all_procs
-                   if not self.patterns or any(pat in p["command"].lower() for pat in self.patterns)]
+                   if (not self.patterns or any(pat in p["command"].lower() for pat in self.patterns))
+                   and not any(pat in p["command"].lower() for pat in self.exclude_patterns)]
 
         tree = build_tree(matched, all_procs, self._sort_key(), self._sort_reverse())
         flat = flatten_tree(tree, self._expanded)
@@ -1094,10 +1090,12 @@ class ProcMonUI:
         ts = time.strftime("%H:%M:%S")
         n = self.matched_count
         sort_label = {"m": "mem", "c": "cpu", "n": "net", "R": "recv", "O": "sent", "V": "vendor", "A": "a-z"}.get(self.sort_mode, "mem")
+        filter_parts = []
         if self.name:
-            filter_str = f" matching '{self.name}'"
-        else:
-            filter_str = ""
+            filter_parts.append(f"+'{self.name}'")
+        if self.exclude_name:
+            filter_parts.append(f"-'{self.exclude_name}'")
+        filter_str = f" [{' '.join(filter_parts)}]" if filter_parts else ""
         # Render header with colored segments
         self._put(y, 0, " " * w, curses.color_pair(1))
         x = 0
@@ -1257,7 +1255,7 @@ class ProcMonUI:
         sort_ind_n = "*" if self.sort_mode == SORT_NET else " "
         sort_ind_bi = "*" if self.sort_mode == SORT_BYTES_IN else " "
         sort_ind_bo = "*" if self.sort_mode == SORT_BYTES_OUT else " "
-        right_parts = [f"{'MEM':>8}{sort_ind_m}", f"{'CPU%':>6}{sort_ind_c}", f"{'THR':>4}"]
+        right_parts = [f"{'PID':>7}", f"{'PPID':>7}", f"{'MEM':>8}{sort_ind_m}", f"{'CPU%':>6}{sort_ind_c}", f"{'THR':>4}"]
         if not self.skip_fd:
             right_parts.append(f"{'FDs':>5}")
         right_parts += [f"{'Forks':>6}", f"{'\u2193 In':>9}{sort_ind_n}", f"{'\u2191 Out':>10}",
@@ -1274,7 +1272,7 @@ class ProcMonUI:
         net_out = r.get("agg_net_out", max(r.get("net_out", 0), 0))
         b_in = r.get("agg_bytes_in", r.get("bytes_in", 0))
         b_out = r.get("agg_bytes_out", r.get("bytes_out", 0))
-        right_parts = [f"{fmt_mem(mem):>8} ", f"{cpu:6.1f} ", f"{thr:4}"]
+        right_parts = [f"{r['pid']:7}", f"{r['ppid']:7}", f"{fmt_mem(mem):>8} ", f"{cpu:6.1f} ", f"{thr:4}"]
         if not self.skip_fd:
             right_parts.append(f"{r['fds']:5}" if r.get("fds", -1) >= 0 else f"{'?':>5}")
         right_parts += [
@@ -1290,11 +1288,7 @@ class ProcMonUI:
             indicator = "\u25b6 " if r["is_collapsed"] else "\u25bc "
         else:
             indicator = "  "
-        name = _short_command(r["command"])
-        group_count = r.get("_group_count", 0)
-        if group_count > 1:
-            name += f" (x{group_count})"
-        left = r["prefix"] + indicator + name
+        left = r["prefix"] + indicator + _short_command(r["command"])
         if len(left) > left_w:
             left = left[: left_w - 1] + "\u2026"
         return f" {left:<{left_w}} {right}"
@@ -1314,10 +1308,7 @@ class ProcMonUI:
         agg_no = r.get("agg_net_out", 0)
         has_ch = r.get("has_children", False)
 
-        group_count = r.get("_group_count", 0)
         pid_line = f"PID: {r['pid']}  PPID: {r['ppid']}  Forks: {r['forks']}  Threads: {r['threads']}"
-        if group_count > 1:
-            pid_line += f"  Grouped: x{group_count}"
         if has_ch:
             pid_line += f" (group: {agg_thr})"
 
@@ -2122,27 +2113,31 @@ class ProcMonUI:
             pass
 
     def _prompt_filter(self):
-        """Show a text input at the bottom of the screen to change the filter."""
+        """Show filter dialog with include and exclude fields."""
         h, w = self.stdscr.getmaxyx()
-        prompt = " Filter: "
-        y = h - 1
-        self._put(y, 0, prompt.ljust(w)[:w], curses.color_pair(4) | curses.A_BOLD)
-        self.stdscr.refresh()
-
         curses.curs_set(1)
-        self.stdscr.timeout(-1)  # blocking input while typing
+        self.stdscr.timeout(-1)
 
-        buf = list(self.name)
-        cursor = len(buf)
+        fields = [
+            (" Include: ", self.name),
+            (" Exclude: ", self.exclude_name),
+        ]
+        bufs = [list(f[1]) for f in fields]
+        cursors = [len(b) for b in bufs]
+        selected = 0
+        hint = " e.g. claude,node  — Tab switch, Enter save, Esc cancel"
 
         while True:
-            # Render input line
-            text = "".join(buf)
-            display = prompt + text
-            self._put(y, 0, display.ljust(w)[:w], curses.color_pair(4) | curses.A_BOLD)
-            cx = min(len(prompt) + cursor, w - 1)
+            for i, (prompt, _) in enumerate(fields):
+                y = h - 3 + i
+                text = "".join(bufs[i])
+                display = prompt + text
+                attr = curses.color_pair(14) | curses.A_BOLD if i == selected else curses.color_pair(13)
+                self._put(y, 0, display.ljust(w)[:w], attr)
+            self._put(h - 1, 0, hint[:w].ljust(w), curses.color_pair(13) | curses.A_DIM)
+            cx = min(len(fields[selected][0]) + cursors[selected], w - 1)
             try:
-                self.stdscr.move(y, cx)
+                self.stdscr.move(h - 3 + selected, cx)
             except curses.error:
                 pass
             self.stdscr.refresh()
@@ -2150,40 +2145,43 @@ class ProcMonUI:
             ch = self.stdscr.getch()
             if ch in (curses.KEY_ENTER, 10, 13):
                 break
-            elif ch == 27:  # Escape — cancel
+            elif ch == 27:
                 curses.curs_set(0)
                 self.stdscr.timeout(100)
                 return
+            elif ch == ord("\t") or ch == curses.KEY_UP or ch == curses.KEY_DOWN:
+                selected = 1 - selected
             elif ch in (curses.KEY_BACKSPACE, 127, 8):
-                if cursor > 0:
-                    buf.pop(cursor - 1)
-                    cursor -= 1
-            elif ch == curses.KEY_DC:  # Delete key
-                if cursor < len(buf):
-                    buf.pop(cursor)
+                if cursors[selected] > 0:
+                    bufs[selected].pop(cursors[selected] - 1)
+                    cursors[selected] -= 1
+            elif ch == curses.KEY_DC:
+                if cursors[selected] < len(bufs[selected]):
+                    bufs[selected].pop(cursors[selected])
             elif ch == curses.KEY_LEFT:
-                if cursor > 0:
-                    cursor -= 1
+                if cursors[selected] > 0:
+                    cursors[selected] -= 1
             elif ch == curses.KEY_RIGHT:
-                if cursor < len(buf):
-                    cursor += 1
-            elif ch == curses.KEY_HOME or ch == 1:  # Ctrl-A
-                cursor = 0
-            elif ch == curses.KEY_END or ch == 5:  # Ctrl-E
-                cursor = len(buf)
-            elif ch == 21:  # Ctrl-U — clear line
-                buf.clear()
-                cursor = 0
+                if cursors[selected] < len(bufs[selected]):
+                    cursors[selected] += 1
+            elif ch == curses.KEY_HOME or ch == 1:
+                cursors[selected] = 0
+            elif ch == curses.KEY_END or ch == 5:
+                cursors[selected] = len(bufs[selected])
+            elif ch == 21:  # Ctrl-U
+                bufs[selected].clear()
+                cursors[selected] = 0
             elif 32 <= ch <= 126:
-                buf.insert(cursor, chr(ch))
-                cursor += 1
+                bufs[selected].insert(cursors[selected], chr(ch))
+                cursors[selected] += 1
 
         curses.curs_set(0)
         self.stdscr.timeout(100)
 
-        new_filter = "".join(buf).strip()
-        self.name = new_filter
-        self.patterns = [p.strip().lower() for p in new_filter.split(",") if p.strip()] if new_filter else []
+        self.name = "".join(bufs[0]).strip()
+        self.patterns = [p.strip().lower() for p in self.name.split(",") if p.strip()] if self.name else []
+        self.exclude_name = "".join(bufs[1]).strip()
+        self.exclude_patterns = [p.strip().lower() for p in self.exclude_name.split(",") if p.strip()] if self.exclude_name else []
         self.selected = 0
         self.scroll_offset = 0
         self._expanded.clear()
@@ -2240,7 +2238,8 @@ class ProcMonUI:
             p["bytes_out"] = snap[1] if snap else 0
 
         matched = [p for p in all_procs
-                   if not self.patterns or any(pat in p["command"].lower() for pat in self.patterns)]
+                   if (not self.patterns or any(pat in p["command"].lower() for pat in self.patterns))
+                   and not any(pat in p["command"].lower() for pat in self.exclude_patterns)]
 
         tree = build_tree(matched, all_procs, self._sort_key(), self._sort_reverse())
         flat = flatten_tree(tree, self._expanded)
