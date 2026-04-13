@@ -2,6 +2,23 @@
 
 A resilient, real-time process monitor for macOS with tree view, network tracking, and color-coded resource alerts. Single-file, zero dependencies.
 
+## Screenshots
+
+### General View
+Process list sorted by memory with detail panel showing PID, CPU, memory, threads, FDs, network rates, and the full command path.
+
+![General View](screenshots/general-view.png)
+
+### Network View
+Per-process network connections with protocol, service, organization, GeoIP location, and per-flow byte counters. Full org name shown for the selected connection.
+
+![Network View](screenshots/network-view.png)
+
+### Process Group View
+Expanded process tree showing parent and child processes with aggregated stats across the group.
+
+![Process Group View](screenshots/process-group-view.png)
+
 ## Features
 
 - **Process Tree View** - Hierarchical parent-child display with collapsible nodes, aggregated stats across subtrees (CPU, memory, threads, FDs, forks, network)
