@@ -1072,6 +1072,7 @@ class ProcMonUI:
                     break
 
         self.rows = flat
+        self._all_procs = matched
         self.matched_count = len(matched)
         if self.selected >= len(self.rows):
             self.selected = max(0, len(self.rows) - 1)
@@ -2075,16 +2076,17 @@ class ProcMonUI:
         # Cooldown based on configured interval
         if now - self._alert_last_sound < self._alert_interval:
             return
-        # System-wide totals
-        total_cpu = sum(r.get("cpu", 0) for r in self.rows)
-        total_mem_mb = sum(r.get("rss_kb", 0) for r in self.rows) / 1024.0
-        total_thr = sum(r.get("threads", 0) for r in self.rows)
-        total_fds = sum(max(r.get("fds", 0), 0) for r in self.rows)
-        total_forks = sum(r.get("forks", 0) for r in self.rows)
-        total_net_in = sum(max(r.get("net_in", 0), 0) for r in self.rows) / 1024.0
-        total_net_out = sum(max(r.get("net_out", 0), 0) for r in self.rows) / 1024.0
-        total_recv_mb = sum(r.get("bytes_in", 0) for r in self.rows) / (1024 * 1024)
-        total_sent_mb = sum(r.get("bytes_out", 0) for r in self.rows) / (1024 * 1024)
+        # System-wide totals from all matched processes (not just visible rows)
+        procs = getattr(self, "_all_procs", self.rows)
+        total_cpu = sum(p.get("cpu", 0) for p in procs)
+        total_mem_mb = sum(p.get("rss_kb", 0) for p in procs) / 1024.0
+        total_thr = sum(p.get("threads", 0) for p in procs)
+        total_fds = sum(max(p.get("fds", 0), 0) for p in procs)
+        total_forks = sum(p.get("forks", 0) for p in procs)
+        total_net_in = sum(max(p.get("net_in", 0), 0) for p in procs) / 1024.0
+        total_net_out = sum(max(p.get("net_out", 0), 0) for p in procs) / 1024.0
+        total_recv_mb = sum(p.get("bytes_in", 0) for p in procs) / (1024 * 1024)
+        total_sent_mb = sum(p.get("bytes_out", 0) for p in procs) / (1024 * 1024)
 
         triggered = (
             (t["cpu"] > 0 and total_cpu > t["cpu"])
@@ -2252,6 +2254,7 @@ class ProcMonUI:
             r["cwd"] = prev.get("cwd", "-")
 
         self.rows = flat
+        self._all_procs = matched
         self.matched_count = len(matched)
 
         # Restore selection

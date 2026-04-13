@@ -19,6 +19,11 @@ Expanded process tree showing parent and child processes with aggregated stats a
 
 ![Process Group View](screenshots/process-group-view.png)
 
+### Alert Configuration
+System-wide alert thresholds with configurable repeat interval and max alert count. Settings persist to `~/.procmon.json`.
+
+![Alert Configuration](screenshots/config-view.png)
+
 ## Features
 
 - **Process Tree View** - Hierarchical parent-child display with collapsible nodes, aggregated stats across subtrees (CPU, memory, threads, FDs, forks, network)
