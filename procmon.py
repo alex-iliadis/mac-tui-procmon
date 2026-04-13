@@ -16,6 +16,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 
 HOME = os.path.expanduser("~")
@@ -864,6 +865,10 @@ class ProcMonUI:
             "sent_mb": 0.0,  # ↑ Sent (MB)
         }
         self._alert_last_sound = 0.0  # monotonic time of last alert sound
+        # Background network fetch state
+        self._net_worker = None      # threading.Thread for async net fetch
+        self._net_pending = None     # result list from background fetch (or "loading" sentinel)
+        self._net_loading = False    # True while a background fetch is in flight
 
         curses.curs_set(0)
         curses.use_default_colors()
@@ -1079,6 +1084,8 @@ class ProcMonUI:
                     if idx == self._net_selected and e.get("org"):
                         line += f"  org: {e['org']}"
                     detail_all_lines.append(line)
+            elif self._net_loading:
+                detail_all_lines = [" Loading network connections\u2026"]
             else:
                 detail_all_lines = [" No active network connections"]
             detail_title = f"Network \u2014 {self._net_cmd} ({self._net_pid})"
@@ -1568,18 +1575,13 @@ class ProcMonUI:
             os.kill(pid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
             pass
-        # Refresh connections
-        self._net_entries = self._fetch_net_connections(self._net_pid)
-        if self._net_selected >= len(self._net_entries):
-            self._net_selected = max(0, len(self._net_entries) - 1)
+        # Refresh connections in background
+        self._start_net_fetch(self._net_pid)
 
-    def _refresh_net_bytes(self):
-        """Update byte counters for active net connections using per-flow nettop."""
-        if not self._net_pid:
-            return
-        pids = self._get_subtree_pids(self._net_pid)
+    def _do_refresh_net_bytes(self, root_pid):
+        """Fetch nettop flow data + re-fetch connections. Called from background thread."""
+        pids = self._get_subtree_pids(root_pid)
         try:
-            # No -P: get per-flow data, not per-process summaries
             cmd = ["nettop", "-L", "1", "-x", "-J", "bytes_in,bytes_out", "-n"]
             for p in pids:
                 cmd += ["-p", str(p)]
@@ -1590,14 +1592,12 @@ class ProcMonUI:
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
-                return
+                stdout = b""
         except (FileNotFoundError, OSError):
-            return
+            stdout = b""
 
-        # Parse per-flow lines like:
-        #   "tcp4 192.168.1.106:54747<->3.5.29.205:443,12345,6789,"
-        # Key by normalized "src->dst" address pair
-        flow_bytes = {}  # "src->dst" -> (bytes_in, bytes_out)
+        # Parse per-flow lines
+        flow_bytes = {}
         for line in stdout.decode("utf-8", errors="replace").splitlines():
             if line.startswith(",") or not line.strip():
                 continue
@@ -1615,26 +1615,16 @@ class ProcMonUI:
                 addr_key = addr_part.replace("<->", "->")
                 flow_bytes[addr_key] = (b_in, b_out)
 
-        # Match flows to connection entries by address
+        # Update byte cache (safe — only this thread writes these keys)
         for e in self._net_entries:
             addr = e.get("addr_key", "")
             if addr in flow_bytes:
                 key = (e["pid"], e["fd"])
-                b_in, b_out = flow_bytes[addr]
-                self._net_bytes[key] = (b_in, b_out)
+                self._net_bytes[key] = flow_bytes[addr]
 
-        # Re-fetch to update displays with new byte counts
-        sel_fd = None
-        if self._net_entries and self._net_selected < len(self._net_entries):
-            sel_fd = self._net_entries[self._net_selected]["fd"]
-        self._net_entries = self._fetch_net_connections(self._net_pid)
-        if sel_fd:
-            for i, e in enumerate(self._net_entries):
-                if e["fd"] == sel_fd:
-                    self._net_selected = i
-                    break
-        if self._net_selected >= len(self._net_entries):
-            self._net_selected = max(0, len(self._net_entries) - 1)
+        # Re-fetch connections and store as pending result
+        result = self._fetch_net_connections(root_pid)
+        self._net_pending = result
 
     def _toggle_net_mode(self):
         """Toggle network connection view in the detail box."""
@@ -1644,18 +1634,75 @@ class ProcMonUI:
             return
         if not self.rows:
             return
-        # Show loading indicator
-        h, w = self.stdscr.getmaxyx()
-        self._put(h - 2, 1, " Loading network connections\u2026 ", curses.A_DIM)
-        self.stdscr.refresh()
         sel = self.rows[self.selected]
         self._net_pid = sel["pid"]
         self._net_cmd = sel["command"].split()[0].rsplit("/", 1)[-1][:20]
-        self._net_entries = self._fetch_net_connections(sel["pid"])
+        self._net_entries = []
         self._net_selected = 0
         self._net_scroll = 0
         self._net_mode = True
         self._detail_focus = True
+        self._net_loading = True
+        self._start_net_fetch(sel["pid"])
+
+    def _start_net_fetch(self, root_pid):
+        """Launch a background thread to fetch network connections."""
+        if self._net_worker and self._net_worker.is_alive():
+            return  # already running
+        self._net_loading = True
+        self._net_pending = None
+
+        def _worker():
+            try:
+                result = self._fetch_net_connections(root_pid)
+            except Exception:
+                result = []
+            self._net_pending = result
+
+        self._net_worker = threading.Thread(target=_worker, daemon=True)
+        self._net_worker.start()
+
+    def _start_net_refresh(self):
+        """Launch a background thread to refresh net bytes + connections."""
+        if self._net_worker and self._net_worker.is_alive():
+            return
+        self._net_loading = True
+        self._net_pending = None
+        pid = self._net_pid
+
+        def _worker():
+            try:
+                self._do_refresh_net_bytes(pid)
+            except Exception:
+                pass
+
+        self._net_worker = threading.Thread(target=_worker, daemon=True)
+        self._net_worker.start()
+
+    def _poll_net_result(self):
+        """Check if background net fetch completed and apply results. Call from main loop."""
+        if self._net_pending is None:
+            return False
+        if not self._net_mode:
+            # User closed net mode while fetch was in flight
+            self._net_pending = None
+            self._net_loading = False
+            return False
+        # Preserve selection by fd
+        sel_fd = None
+        if self._net_entries and self._net_selected < len(self._net_entries):
+            sel_fd = self._net_entries[self._net_selected]["fd"]
+        self._net_entries = self._net_pending
+        self._net_pending = None
+        self._net_loading = False
+        if sel_fd:
+            for i, e in enumerate(self._net_entries):
+                if e["fd"] == sel_fd:
+                    self._net_selected = i
+                    break
+        if self._net_selected >= len(self._net_entries):
+            self._net_selected = max(0, len(self._net_entries) - 1)
+        return True  # data changed, needs re-render
 
     def _get_subtree_pids(self, root_pid):
         """Get root_pid and all descendant PIDs from the live process table."""
@@ -2109,13 +2156,18 @@ class ProcMonUI:
                     break
                 self.render()
 
+            # Poll for background net fetch results
+            if self._net_pending is not None:
+                if self._poll_net_result():
+                    self.render()
+
             now = time.monotonic()
             if now - last_refresh >= self.interval:
                 try:
                     self.collect_data()
-                    # Auto-refresh net view if open
+                    # Auto-refresh net view if open (non-blocking)
                     if self._net_mode and self._net_pid:
-                        self._refresh_net_bytes()
+                        self._start_net_refresh()
                 except MemoryError:
                     gc.collect()
                     try:
