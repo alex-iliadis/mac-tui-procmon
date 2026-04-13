@@ -203,6 +203,12 @@ _libc.mach_timebase_info.restype = ctypes.c_int
 _libc.mlockall.argtypes = [ctypes.c_int]
 _libc.mlockall.restype = ctypes.c_int
 
+_libc.sysctlbyname.argtypes = [
+    ctypes.c_char_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t),
+    ctypes.c_void_p, ctypes.c_size_t,
+]
+_libc.sysctlbyname.restype = ctypes.c_int
+
 
 # ── Mach Timebase ─────────────────────────────────────────────────────────
 
@@ -348,6 +354,14 @@ def _get_cwd(pid):
     except Exception:
         pass
     return "-"
+
+
+def _get_total_memory_kb():
+    """Get total physical memory in KB via sysctl hw.memsize (no fork)."""
+    val = ctypes.c_uint64(0)
+    sz = ctypes.c_size_t(ctypes.sizeof(val))
+    _libc.sysctlbyname(b"hw.memsize", ctypes.byref(val), ctypes.byref(sz), None, 0)
+    return val.value // 1024
 
 
 def get_all_processes():
@@ -836,6 +850,20 @@ class ProcMonUI:
         self._net_scroll = 0       # Scroll offset in network detail
         self._net_pid = None       # PID the net connections are for
         self._net_bytes = {}       # (pid, fd) -> cumulative bytes
+        self._total_mem_kb = _get_total_memory_kb()
+        # Alert thresholds (0 = disabled)
+        self._alert_thresholds = {
+            "cpu": 0.0,      # CPU %
+            "mem_mb": 0.0,   # MEM in MB
+            "threads": 0,    # Thread count
+            "fds": 0,        # File descriptors
+            "forks": 0,      # Fork count
+            "net_in": 0.0,   # ↓ In (KB/s)
+            "net_out": 0.0,  # ↑ Out (KB/s)
+            "recv_mb": 0.0,  # ↓ Recv (MB)
+            "sent_mb": 0.0,  # ↑ Sent (MB)
+        }
+        self._alert_last_sound = 0.0  # monotonic time of last alert sound
 
         curses.curs_set(0)
         curses.use_default_colors()
@@ -1015,9 +1043,10 @@ class ProcMonUI:
             cpu_str = f"CPU {tc:.1f}%  "
             self._put(y, x, cpu_str, cpu_color | curses.A_BOLD)
             x += len(cpu_str)
-            # MEM — green/yellow/red
+            # MEM — green/yellow/red — show used/total (percent)
             mem_color = curses.color_pair(5) if tm > 8*1024*1024 else curses.color_pair(6) if tm > 2*1024*1024 else curses.color_pair(1)
-            mem_str = f"MEM {fmt_mem(tm)}  "
+            mem_pct = (tm / self._total_mem_kb * 100) if self._total_mem_kb > 0 else 0
+            mem_str = f"MEM {fmt_mem(tm)}/{fmt_mem(self._total_mem_kb)} ({mem_pct:.1f}%)  "
             self._put(y, x, mem_str, mem_color | curses.A_BOLD)
             x += len(mem_str)
             # Threads
@@ -1376,6 +1405,7 @@ class ProcMonUI:
                 ("O", "\u2191Out"),
                 ("N", "Conns"),
                 ("f", "Filter"),
+                ("C", "Config"),
                 ("\u2190\u2192", "Fold"),
                 ("PgU/D", "Page"),
                 ("k", "Kill"),
@@ -1475,6 +1505,8 @@ class ProcMonUI:
         elif key == ord("\t"):
             if self._net_mode:
                 self._detail_focus = True
+        elif key == ord("C"):  # Shift+C — alert config
+            self._prompt_config()
         elif key == ord("f"):
             self._prompt_filter()
         elif key == ord("k"):
@@ -1761,6 +1793,167 @@ class ProcMonUI:
         entries.sort(key=lambda e: e["bytes_total"], reverse=True)
         return entries
 
+    def _prompt_config(self):
+        """Show alert threshold configuration screen (Shift+C)."""
+        h, w = self.stdscr.getmaxyx()
+        fields = [
+            ("CPU %", "cpu", ""),
+            ("MEM (MB)", "mem_mb", ""),
+            ("Threads", "threads", ""),
+            ("FDs", "fds", ""),
+            ("Forks", "forks", ""),
+            ("↓ In (KB/s)", "net_in", ""),
+            ("↑ Out (KB/s)", "net_out", ""),
+            ("↓ Recv (MB)", "recv_mb", ""),
+            ("↑ Sent (MB)", "sent_mb", ""),
+        ]
+        # Initialize buffers from current thresholds
+        bufs = []
+        for label, key, _ in fields:
+            v = self._alert_thresholds[key]
+            bufs.append(list(str(int(v)) if v == int(v) else str(v)) if v else [])
+
+        selected = 0
+        cursors = [len(b) for b in bufs]
+
+        curses.curs_set(1)
+        self.stdscr.timeout(-1)
+
+        title = " Alert Thresholds (0 = off) — ↑↓ navigate, Enter save, Esc cancel "
+        box_w = min(50, w - 4)
+        box_h = len(fields) + 4  # title + fields + blank + hint
+        box_y = max(0, (h - box_h) // 2)
+        box_x = max(0, (w - box_w) // 2)
+
+        while True:
+            # Draw box background
+            for row in range(box_h):
+                self._put(box_y + row, box_x, " " * box_w, curses.color_pair(4))
+            # Title
+            self._put(box_y, box_x, title[:box_w], curses.color_pair(4) | curses.A_BOLD)
+            # Fields
+            for i, (label, key, _) in enumerate(fields):
+                fy = box_y + 2 + i
+                val_str = "".join(bufs[i])
+                if i == selected:
+                    self._put(fy, box_x + 2, f"▸ {label:>14}: ", curses.color_pair(4) | curses.A_BOLD)
+                    field_x = box_x + 2 + 2 + 14 + 2
+                    # Show value with cursor
+                    self._put(fy, field_x, val_str.ljust(10)[:10], curses.color_pair(2))
+                    cx = min(field_x + cursors[i], box_x + box_w - 2)
+                    try:
+                        self.stdscr.move(fy, cx)
+                    except curses.error:
+                        pass
+                else:
+                    display_val = val_str if val_str and val_str != "0" else "off"
+                    self._put(fy, box_x + 2, f"  {label:>14}: {display_val}", curses.color_pair(4))
+            # Hint
+            self._put(box_y + box_h - 1, box_x + 2, "Sound plays when any process exceeds threshold", curses.color_pair(4) | curses.A_DIM)
+            self.stdscr.refresh()
+
+            ch = self.stdscr.getch()
+            if ch in (curses.KEY_ENTER, 10, 13):
+                break
+            elif ch == 27:
+                curses.curs_set(0)
+                self.stdscr.timeout(100)
+                return
+            elif ch == curses.KEY_UP:
+                selected = (selected - 1) % len(fields)
+            elif ch == curses.KEY_DOWN:
+                selected = (selected + 1) % len(fields)
+            elif ch == ord("\t"):
+                selected = (selected + 1) % len(fields)
+            elif ch in (curses.KEY_BACKSPACE, 127, 8):
+                if cursors[selected] > 0:
+                    bufs[selected].pop(cursors[selected] - 1)
+                    cursors[selected] -= 1
+            elif ch == curses.KEY_DC:
+                if cursors[selected] < len(bufs[selected]):
+                    bufs[selected].pop(cursors[selected])
+            elif ch == curses.KEY_LEFT:
+                if cursors[selected] > 0:
+                    cursors[selected] -= 1
+            elif ch == curses.KEY_RIGHT:
+                if cursors[selected] < len(bufs[selected]):
+                    cursors[selected] += 1
+            elif ch == curses.KEY_HOME or ch == 1:
+                cursors[selected] = 0
+            elif ch == curses.KEY_END or ch == 5:
+                cursors[selected] = len(bufs[selected])
+            elif ch == 21:  # Ctrl-U
+                bufs[selected].clear()
+                cursors[selected] = 0
+            elif 32 <= ch <= 126:
+                c = chr(ch)
+                if c in "0123456789.":
+                    bufs[selected].insert(cursors[selected], c)
+                    cursors[selected] += 1
+
+        # Apply thresholds
+        for i, (label, key, _) in enumerate(fields):
+            val_str = "".join(bufs[i]).strip()
+            try:
+                v = float(val_str) if val_str else 0.0
+            except ValueError:
+                v = 0.0
+            self._alert_thresholds[key] = v
+
+        curses.curs_set(0)
+        self.stdscr.timeout(100)
+
+    def _check_alerts(self):
+        """Check if any process exceeds alert thresholds and play system sound."""
+        t = self._alert_thresholds
+        # Quick check: any threshold set?
+        if not any(v > 0 for v in t.values()):
+            return
+        now = time.monotonic()
+        # Cooldown: don't play sound more than once every 10 seconds
+        if now - self._alert_last_sound < 10:
+            return
+        triggered = False
+        for r in self.rows:
+            if triggered:
+                break
+            agg_cpu = r.get("agg_cpu", r["cpu"])
+            agg_mem_mb = r.get("agg_rss_kb", r["rss_kb"]) / 1024.0
+            agg_thr = r.get("agg_threads", r["threads"])
+            agg_fds = r.get("agg_fds", r.get("fds", 0))
+            agg_forks = r.get("agg_forks", r.get("forks", 0))
+            agg_net_in = r.get("agg_net_in", max(r.get("net_in", 0), 0)) / 1024.0  # KB/s
+            agg_net_out = r.get("agg_net_out", max(r.get("net_out", 0), 0)) / 1024.0
+            agg_recv_mb = r.get("agg_bytes_in", r.get("bytes_in", 0)) / (1024 * 1024)
+            agg_sent_mb = r.get("agg_bytes_out", r.get("bytes_out", 0)) / (1024 * 1024)
+            if t["cpu"] > 0 and agg_cpu > t["cpu"]:
+                triggered = True
+            elif t["mem_mb"] > 0 and agg_mem_mb > t["mem_mb"]:
+                triggered = True
+            elif t["threads"] > 0 and agg_thr > t["threads"]:
+                triggered = True
+            elif t["fds"] > 0 and agg_fds > t["fds"]:
+                triggered = True
+            elif t["forks"] > 0 and agg_forks > t["forks"]:
+                triggered = True
+            elif t["net_in"] > 0 and agg_net_in > t["net_in"]:
+                triggered = True
+            elif t["net_out"] > 0 and agg_net_out > t["net_out"]:
+                triggered = True
+            elif t["recv_mb"] > 0 and agg_recv_mb > t["recv_mb"]:
+                triggered = True
+            elif t["sent_mb"] > 0 and agg_sent_mb > t["sent_mb"]:
+                triggered = True
+        if triggered:
+            self._alert_last_sound = now
+            try:
+                subprocess.Popen(
+                    ["afplay", "/System/Library/Sounds/Glass.aiff"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+            except OSError:
+                pass
+
     def _prompt_filter(self):
         """Show a text input at the bottom of the screen to change the filter."""
         h, w = self.stdscr.getmaxyx()
@@ -1929,6 +2122,7 @@ class ProcMonUI:
                         self.collect_data()
                     except MemoryError:
                         pass
+                self._check_alerts()
                 self.render()
                 last_refresh = now
 
