@@ -781,11 +781,62 @@ def build_tree(matched, all_procs, sort_key, reverse=True):
         node["agg_net_out"] = max(node.get("net_out", 0), 0) + sum(c["agg_net_out"] for c in node["children"])
         node["agg_bytes_in"] = node.get("bytes_in", 0) + sum(c.get("agg_bytes_in", 0) for c in node["children"])
         node["agg_bytes_out"] = node.get("bytes_out", 0) + sum(c.get("agg_bytes_out", 0) for c in node["children"])
+        # Group children with the same short name
+        node["children"] = _group_siblings(node["children"])
         # Sort children by aggregate values
         node["children"].sort(key=sort_key, reverse=reverse)
         return node
 
     return sorted([build_node(r) for r in roots], key=sort_key, reverse=reverse)
+
+
+def _group_siblings(children):
+    """Group sibling nodes that share the same short command name into a single
+    synthetic node. Only groups when there are 2+ siblings with the same name."""
+    if len(children) <= 1:
+        return children
+    from collections import OrderedDict
+    groups = OrderedDict()
+    for child in children:
+        name = _short_command(child["command"])
+        groups.setdefault(name, []).append(child)
+
+    result = []
+    for name, members in groups.items():
+        if len(members) == 1:
+            result.append(members[0])
+            continue
+        # Create a synthetic group node from the first member
+        leader = members[0]
+        group = {**leader}
+        group["command"] = leader["command"]  # keep original command
+        group["_group_name"] = name
+        group["_group_count"] = len(members)
+        group["pid"] = leader["pid"]  # use first PID for selection/expand
+        group["_group_pids"] = [m["pid"] for m in members]
+        # Merge all members' children into the group
+        merged_children = []
+        for m in members:
+            merged_children.extend(m.get("children", []))
+        group["children"] = merged_children
+        # Recompute aggregates across all members
+        group["rss_kb"] = sum(m["rss_kb"] for m in members)
+        group["cpu"] = sum(m["cpu"] for m in members)
+        group["cpu_ticks"] = sum(m["cpu_ticks"] for m in members)
+        group["threads"] = sum(m["threads"] for m in members)
+        group["agg_rss_kb"] = sum(m.get("agg_rss_kb", m["rss_kb"]) for m in members)
+        group["agg_cpu"] = sum(m.get("agg_cpu", m["cpu"]) for m in members)
+        group["agg_cpu_ticks"] = sum(m.get("agg_cpu_ticks", m["cpu_ticks"]) for m in members)
+        group["agg_threads"] = sum(m.get("agg_threads", m["threads"]) for m in members)
+        group["agg_forks"] = sum(m.get("agg_forks", 0) for m in members)
+        group["agg_net_in"] = sum(m.get("agg_net_in", 0) for m in members)
+        group["agg_net_out"] = sum(m.get("agg_net_out", 0) for m in members)
+        group["agg_bytes_in"] = sum(m.get("agg_bytes_in", 0) for m in members)
+        group["agg_bytes_out"] = sum(m.get("agg_bytes_out", 0) for m in members)
+        for key in ("net_in", "net_out", "bytes_in", "bytes_out"):
+            group[key] = sum(m.get(key, 0) for m in members)
+        result.append(group)
+    return result
 
 
 def flatten_tree(tree, expanded=None):
@@ -865,6 +916,9 @@ class ProcMonUI:
             "sent_mb": 0.0,  # ↑ Sent (MB)
         }
         self._alert_last_sound = 0.0  # monotonic time of last alert sound
+        self._alert_interval = 60     # seconds between repeated alerts
+        self._alert_max_count = 5     # max number of alert sounds (0 = unlimited)
+        self._alert_count = 0         # alerts fired so far
         # Background network fetch state
         self._net_worker = None      # threading.Thread for async net fetch
         self._net_pending = None     # result list from background fetch (or "loading" sentinel)
@@ -884,7 +938,38 @@ class ProcMonUI:
         curses.init_pair(10, 251, -1)  # light grey
         curses.init_pair(11, 156, -1)  # light green (256-color)
         curses.init_pair(12, 203, -1)  # salmon/light red (256-color)
+        curses.init_pair(13, curses.COLOR_CYAN, 236)  # dialog box: cyan on dark grey
+        curses.init_pair(14, curses.COLOR_WHITE, 236)  # dialog box: white on dark grey (selected)
         stdscr.timeout(100)
+        self._load_config()
+
+    _CONFIG_PATH = os.path.expanduser("~/.procmon.json")
+
+    def _load_config(self):
+        """Load saved config from ~/.procmon.json if it exists."""
+        try:
+            with open(self._CONFIG_PATH) as f:
+                cfg = _json.loads(f.read())
+            for k, v in cfg.get("alert_thresholds", {}).items():
+                if k in self._alert_thresholds:
+                    self._alert_thresholds[k] = v
+            self._alert_interval = cfg.get("alert_interval", self._alert_interval)
+            self._alert_max_count = cfg.get("alert_max_count", self._alert_max_count)
+        except (FileNotFoundError, ValueError, KeyError):
+            pass
+
+    def _save_config(self):
+        """Save current config to ~/.procmon.json."""
+        cfg = {
+            "alert_thresholds": self._alert_thresholds,
+            "alert_interval": self._alert_interval,
+            "alert_max_count": self._alert_max_count,
+        }
+        try:
+            with open(self._CONFIG_PATH, "w") as f:
+                f.write(_json.dumps(cfg, indent=2))
+        except OSError:
+            pass
 
     def _sort_key(self):
         if self.sort_mode == SORT_CPU:
@@ -1205,7 +1290,11 @@ class ProcMonUI:
             indicator = "\u25b6 " if r["is_collapsed"] else "\u25bc "
         else:
             indicator = "  "
-        left = r["prefix"] + indicator + _short_command(r["command"])
+        name = _short_command(r["command"])
+        group_count = r.get("_group_count", 0)
+        if group_count > 1:
+            name += f" (x{group_count})"
+        left = r["prefix"] + indicator + name
         if len(left) > left_w:
             left = left[: left_w - 1] + "\u2026"
         return f" {left:<{left_w}} {right}"
@@ -1225,7 +1314,10 @@ class ProcMonUI:
         agg_no = r.get("agg_net_out", 0)
         has_ch = r.get("has_children", False)
 
+        group_count = r.get("_group_count", 0)
         pid_line = f"PID: {r['pid']}  PPID: {r['ppid']}  Forks: {r['forks']}  Threads: {r['threads']}"
+        if group_count > 1:
+            pid_line += f"  Grouped: x{group_count}"
         if has_ch:
             pid_line += f" (group: {agg_thr})"
 
@@ -1844,20 +1936,31 @@ class ProcMonUI:
         """Show alert threshold configuration screen (Shift+C)."""
         h, w = self.stdscr.getmaxyx()
         fields = [
-            ("CPU %", "cpu", ""),
-            ("MEM (MB)", "mem_mb", ""),
-            ("Threads", "threads", ""),
-            ("FDs", "fds", ""),
-            ("Forks", "forks", ""),
-            ("↓ In (KB/s)", "net_in", ""),
-            ("↑ Out (KB/s)", "net_out", ""),
-            ("↓ Recv (MB)", "recv_mb", ""),
-            ("↑ Sent (MB)", "sent_mb", ""),
+            ("CPU %", "cpu"),
+            ("MEM (MB)", "mem_mb"),
+            ("Threads", "threads"),
+            ("FDs", "fds"),
+            ("Forks", "forks"),
+            ("↓ In (KB/s)", "net_in"),
+            ("↑ Out (KB/s)", "net_out"),
+            ("↓ Recv (MB)", "recv_mb"),
+            ("↑ Sent (MB)", "sent_mb"),
+            ("", ""),  # separator
+            ("Interval (s)", "_interval"),
+            ("Max alerts", "_max_count"),
         ]
         # Initialize buffers from current thresholds
         bufs = []
-        for label, key, _ in fields:
-            v = self._alert_thresholds[key]
+        for label, key in fields:
+            if not key:
+                bufs.append([])
+                continue
+            if key == "_interval":
+                v = self._alert_interval
+            elif key == "_max_count":
+                v = self._alert_max_count
+            else:
+                v = self._alert_thresholds[key]
             bufs.append(list(str(int(v)) if v == int(v) else str(v)) if v else [])
 
         selected = 0
@@ -1867,7 +1970,7 @@ class ProcMonUI:
         self.stdscr.timeout(-1)
 
         title = " Alert Thresholds (0 = off) — ↑↓ navigate, Enter save, Esc cancel "
-        box_w = min(50, w - 4)
+        box_w = min(max(len(title) + 4, 60), w - 4)
         box_h = len(fields) + 4  # title + fields + blank + hint
         box_y = max(0, (h - box_h) // 2)
         box_x = max(0, (w - box_w) // 2)
@@ -1875,15 +1978,18 @@ class ProcMonUI:
         while True:
             # Draw box background
             for row in range(box_h):
-                self._put(box_y + row, box_x, " " * box_w, curses.color_pair(4))
+                self._put(box_y + row, box_x, " " * box_w, curses.color_pair(13))
             # Title
-            self._put(box_y, box_x, title[:box_w], curses.color_pair(4) | curses.A_BOLD)
+            self._put(box_y, box_x, title[:box_w], curses.color_pair(14) | curses.A_BOLD)
             # Fields
-            for i, (label, key, _) in enumerate(fields):
+            for i, (label, key) in enumerate(fields):
                 fy = box_y + 2 + i
+                if not key:  # separator
+                    self._put(fy, box_x + 2, "─" * (box_w - 4), curses.color_pair(13) | curses.A_DIM)
+                    continue
                 val_str = "".join(bufs[i])
                 if i == selected:
-                    self._put(fy, box_x + 2, f"▸ {label:>14}: ", curses.color_pair(4) | curses.A_BOLD)
+                    self._put(fy, box_x + 2, f"▸ {label:>14}: ", curses.color_pair(14) | curses.A_BOLD)
                     field_x = box_x + 2 + 2 + 14 + 2
                     # Show value with cursor
                     self._put(fy, field_x, val_str.ljust(10)[:10], curses.color_pair(2))
@@ -1894,9 +2000,9 @@ class ProcMonUI:
                         pass
                 else:
                     display_val = val_str if val_str and val_str != "0" else "off"
-                    self._put(fy, box_x + 2, f"  {label:>14}: {display_val}", curses.color_pair(4))
+                    self._put(fy, box_x + 2, f"  {label:>14}: {display_val}", curses.color_pair(13))
             # Hint
-            self._put(box_y + box_h - 1, box_x + 2, "Sound plays when any process exceeds threshold", curses.color_pair(4) | curses.A_DIM)
+            self._put(box_y + box_h - 1, box_x + 2, "Sound plays when system-wide totals exceed threshold", curses.color_pair(13) | curses.A_DIM)
             self.stdscr.refresh()
 
             ch = self.stdscr.getch()
@@ -1908,10 +2014,16 @@ class ProcMonUI:
                 return
             elif ch == curses.KEY_UP:
                 selected = (selected - 1) % len(fields)
+                if not fields[selected][1]:  # skip separator
+                    selected = (selected - 1) % len(fields)
             elif ch == curses.KEY_DOWN:
                 selected = (selected + 1) % len(fields)
+                if not fields[selected][1]:
+                    selected = (selected + 1) % len(fields)
             elif ch == ord("\t"):
                 selected = (selected + 1) % len(fields)
+                if not fields[selected][1]:
+                    selected = (selected + 1) % len(fields)
             elif ch in (curses.KEY_BACKSPACE, 127, 8):
                 if cursors[selected] > 0:
                     bufs[selected].pop(cursors[selected] - 1)
@@ -1939,13 +2051,22 @@ class ProcMonUI:
                     cursors[selected] += 1
 
         # Apply thresholds
-        for i, (label, key, _) in enumerate(fields):
+        for i, (label, key) in enumerate(fields):
+            if not key:
+                continue
             val_str = "".join(bufs[i]).strip()
             try:
                 v = float(val_str) if val_str else 0.0
             except ValueError:
                 v = 0.0
-            self._alert_thresholds[key] = v
+            if key == "_interval":
+                self._alert_interval = max(1, v)
+            elif key == "_max_count":
+                self._alert_max_count = int(max(0, v))
+            else:
+                self._alert_thresholds[key] = v
+        self._alert_count = 0  # reset count on config change
+        self._save_config()
 
         curses.curs_set(0)
         self.stdscr.timeout(100)
@@ -1957,49 +2078,48 @@ class ProcMonUI:
         if not any(v > 0 for v in t.values()):
             return
         now = time.monotonic()
-        # Cooldown: don't play sound more than once every 10 seconds
-        if now - self._alert_last_sound < 10:
+        # Respect max count
+        if self._alert_max_count > 0 and self._alert_count >= self._alert_max_count:
             return
-        triggered = False
-        for r in self.rows:
-            if triggered:
-                break
-            agg_cpu = r.get("agg_cpu", r["cpu"])
-            agg_mem_mb = r.get("agg_rss_kb", r["rss_kb"]) / 1024.0
-            agg_thr = r.get("agg_threads", r["threads"])
-            agg_fds = r.get("agg_fds", r.get("fds", 0))
-            agg_forks = r.get("agg_forks", r.get("forks", 0))
-            agg_net_in = r.get("agg_net_in", max(r.get("net_in", 0), 0)) / 1024.0  # KB/s
-            agg_net_out = r.get("agg_net_out", max(r.get("net_out", 0), 0)) / 1024.0
-            agg_recv_mb = r.get("agg_bytes_in", r.get("bytes_in", 0)) / (1024 * 1024)
-            agg_sent_mb = r.get("agg_bytes_out", r.get("bytes_out", 0)) / (1024 * 1024)
-            if t["cpu"] > 0 and agg_cpu > t["cpu"]:
-                triggered = True
-            elif t["mem_mb"] > 0 and agg_mem_mb > t["mem_mb"]:
-                triggered = True
-            elif t["threads"] > 0 and agg_thr > t["threads"]:
-                triggered = True
-            elif t["fds"] > 0 and agg_fds > t["fds"]:
-                triggered = True
-            elif t["forks"] > 0 and agg_forks > t["forks"]:
-                triggered = True
-            elif t["net_in"] > 0 and agg_net_in > t["net_in"]:
-                triggered = True
-            elif t["net_out"] > 0 and agg_net_out > t["net_out"]:
-                triggered = True
-            elif t["recv_mb"] > 0 and agg_recv_mb > t["recv_mb"]:
-                triggered = True
-            elif t["sent_mb"] > 0 and agg_sent_mb > t["sent_mb"]:
-                triggered = True
-        if triggered:
-            self._alert_last_sound = now
-            try:
-                subprocess.Popen(
-                    ["afplay", "/System/Library/Sounds/Glass.aiff"],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                )
-            except OSError:
-                pass
+        # Cooldown based on configured interval
+        if now - self._alert_last_sound < self._alert_interval:
+            return
+        # System-wide totals
+        total_cpu = sum(r.get("cpu", 0) for r in self.rows)
+        total_mem_mb = sum(r.get("rss_kb", 0) for r in self.rows) / 1024.0
+        total_thr = sum(r.get("threads", 0) for r in self.rows)
+        total_fds = sum(max(r.get("fds", 0), 0) for r in self.rows)
+        total_forks = sum(r.get("forks", 0) for r in self.rows)
+        total_net_in = sum(max(r.get("net_in", 0), 0) for r in self.rows) / 1024.0
+        total_net_out = sum(max(r.get("net_out", 0), 0) for r in self.rows) / 1024.0
+        total_recv_mb = sum(r.get("bytes_in", 0) for r in self.rows) / (1024 * 1024)
+        total_sent_mb = sum(r.get("bytes_out", 0) for r in self.rows) / (1024 * 1024)
+
+        triggered = (
+            (t["cpu"] > 0 and total_cpu > t["cpu"])
+            or (t["mem_mb"] > 0 and total_mem_mb > t["mem_mb"])
+            or (t["threads"] > 0 and total_thr > t["threads"])
+            or (t["fds"] > 0 and total_fds > t["fds"])
+            or (t["forks"] > 0 and total_forks > t["forks"])
+            or (t["net_in"] > 0 and total_net_in > t["net_in"])
+            or (t["net_out"] > 0 and total_net_out > t["net_out"])
+            or (t["recv_mb"] > 0 and total_recv_mb > t["recv_mb"])
+            or (t["sent_mb"] > 0 and total_sent_mb > t["sent_mb"])
+        )
+        if not triggered:
+            # Reset count and timer when no longer triggered
+            self._alert_count = 0
+            self._alert_last_sound = 0.0
+            return
+        self._alert_last_sound = now
+        self._alert_count += 1
+        try:
+            subprocess.Popen(
+                ["afplay", "/System/Library/Sounds/Glass.aiff"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            pass
 
     def _prompt_filter(self):
         """Show a text input at the bottom of the screen to change the filter."""

@@ -22,13 +22,16 @@ Expanded process tree showing parent and child processes with aggregated stats a
 ## Features
 
 - **Process Tree View** - Hierarchical parent-child display with collapsible nodes, aggregated stats across subtrees (CPU, memory, threads, FDs, forks, network)
+- **Sibling Grouping** - Child processes with the same name are automatically grouped (e.g. 20 `pgrep` children become `pgrep (x20)`) with combined stats
 - **7 Sort Modes** - Memory, CPU, Network rate, Bytes In, Bytes Out, Vendor, Alphabetical. Press the same key twice to reverse direction
 - **Network Connections** - Per-process connection list via `lsof` with per-flow byte tracking via `nettop`
-- **GeoIP & Org Lookup** - Remote IPs show city/country and organization (e.g. `[AWS]`, `[Anthropic]`). Full org name shown on selected connection
+- **GeoIP & Org Lookup** - Remote IPs show city/country and abbreviated organization (e.g. `[AWS]`, `[Anthropic]`). Full org name shown on selected connection
 - **Color-Coded Alerts** - Rows turn red when a process group exceeds: 2 GB memory, 80% CPU, 15 forks, 1025 file descriptors, or 250 threads. Orange at lower thresholds
+- **Sound Alerts** - Configurable system-wide threshold alerts with sound notifications. Set CPU, memory, threads, FDs, forks, and network thresholds. Configurable repeat interval and max alert count. Resets when values drop below threshold
 - **Process Filtering** - Case-insensitive substring filter, live-updated
 - **File Descriptor Tracking** - Per-process and aggregated FD counts (can be disabled with `--no-fd` for speed)
 - **Kill Support** - Kill a process subtree or a specific network connection's owning process
+- **Persistent Config** - Alert thresholds and settings saved to `~/.procmon.json`, loaded automatically on startup
 - **Resilient Design** - Locks its own memory and boosts priority so it keeps running during fork bombs or memory exhaustion. Avoids `fork()`/`exec()` by using ctypes directly
 
 ## Platform
@@ -62,6 +65,24 @@ procmon firefox -i 2       # Monitor Firefox, refresh every 2 seconds
 procmon --no-fd            # All processes, no FD tracking
 ```
 
+## Configuration
+
+Press `C` to open the alert thresholds dialog. Settings are saved to `~/.procmon.json` and persist across sessions.
+
+| Setting | Description |
+|---------|-------------|
+| CPU % | System-wide CPU usage threshold |
+| MEM (MB) | System-wide memory threshold in MB |
+| Threads | Total thread count threshold |
+| FDs | Total file descriptor threshold |
+| Forks | Total fork count threshold |
+| In/Out (KB/s) | Network rate thresholds |
+| Recv/Sent (MB) | Cumulative network byte thresholds |
+| Interval (s) | Seconds between repeated alerts (default: 60) |
+| Max alerts | Maximum alert sounds before stopping (0 = unlimited, default: 5) |
+
+Alerts reset immediately when values drop below threshold.
+
 ## Keybindings
 
 ### Process List
@@ -77,6 +98,7 @@ procmon --no-fd            # All processes, no FD tracking
 | `O` | Sort by bytes sent |
 | `N` | Open network connections for selected process |
 | `f` | Filter processes |
+| `C` | Open alert threshold configuration |
 | `Left/Right` | Collapse / expand tree node |
 | `PgUp/PgDn` | Page navigation |
 | `k` | Kill selected process subtree |

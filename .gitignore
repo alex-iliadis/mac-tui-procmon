@@ -32,6 +32,7 @@ CLAUDE.md
 *.key
 credentials.json
 secrets.json
+.procmon.json
 
 # OS
 Thumbs.db
