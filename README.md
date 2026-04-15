@@ -27,12 +27,14 @@ System-wide alert thresholds with configurable repeat interval and max alert cou
 ## Features
 
 - **Process Tree View** - Hierarchical parent-child display with collapsible nodes, aggregated stats across subtrees (CPU, memory, threads, FDs, forks, network)
-- **Sibling Grouping** - Child processes with the same name are automatically grouped into a collapsible parent node with combined stats
-- **7 Sort Modes** - Memory, CPU, Network rate, Bytes In, Bytes Out, Vendor, Alphabetical. Press the same key twice to reverse direction
+- **Sibling Grouping** - Child processes with the same name are automatically grouped into a collapsible parent node with combined stats. Group header shows the member count (e.g. `Google Chrome Helper (Renderer) [Google] (16)`)
+- **Vendor Grouping** - Press `g` to group all processes by vendor (Apple, Google, Microsoft, etc.) at the top level. Detects vendors from path prefixes and reverse-DNS names (e.g. `com.apple.weather.menu`)
+- **Dynamic Sort** - Press `d` to pin threshold-exceeding processes to the top, with the active sort mode as secondary ordering within each group
+- **9 Sort Modes** - Memory, CPU, Network rate, Bytes In, Bytes Out, Vendor, Alphabetical, Dynamic, Vendor Group. Press the same key twice to reverse direction
 - **Network Connections** - Per-process connection list via `lsof` with per-flow byte tracking via `nettop`
 - **GeoIP & Org Lookup** - Remote IPs show city/country and abbreviated organization (e.g. `[AWS]`, `[Anthropic]`). Full org name shown on selected connection
-- **Color-Coded Alerts** - Rows turn red when a process group exceeds: 2 GB memory, 80% CPU, 15 forks, 1025 file descriptors, or 250 threads. Orange at lower thresholds
-- **Sound Alerts** - Configurable system-wide threshold alerts with sound notifications. Set CPU, memory, threads, FDs, forks, and network thresholds. Configurable repeat interval and max alert count. Resets when values drop below threshold
+- **Per-Cell Threshold Coloring** - Individual metric columns (CPU, MEM, THR, FDs, etc.) turn red when they exceed their configured threshold, yellow at 80%. Only the specific metric is highlighted, not the entire row
+- **Sound Alerts** - Configurable system-wide threshold alerts with sound notifications. Set CPU, memory, threads, FDs, forks, and network thresholds. Configurable repeat interval and max alert count. Counter only resets after a sustained period below threshold (one full interval), preventing infinite alerts from oscillating values
 - **Process Filtering** - Include and exclude filters (comma-separated). Combine both to narrow results
 - **File Descriptor Tracking** - Per-process and aggregated FD counts (can be disabled with `--no-fd` for speed)
 - **Kill Support** - Kill a process subtree or a specific network connection's owning process
@@ -86,7 +88,7 @@ Press `C` to open the alert thresholds dialog. Settings are saved to `~/.procmon
 | Interval (s) | Seconds between repeated alerts (default: 60) |
 | Max alerts | Maximum alert sounds before stopping (0 = unlimited, default: 5) |
 
-Alerts reset immediately when values drop below threshold.
+Alert counter resets only after values stay below threshold for a full interval (prevents infinite alerts from oscillating values).
 
 ## Keybindings
 
@@ -101,6 +103,8 @@ Alerts reset immediately when values drop below threshold.
 | `V` | Sort by vendor |
 | `R` | Sort by bytes received |
 | `O` | Sort by bytes sent |
+| `d` | Toggle dynamic sort (threshold-exceeding processes first) |
+| `g` | Toggle vendor grouping |
 | `N` | Open network connections for selected process |
 | `f` | Filter processes |
 | `C` | Open alert threshold configuration |

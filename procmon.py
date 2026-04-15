@@ -29,6 +29,7 @@ SORT_BYTES_IN = "R"
 SORT_BYTES_OUT = "O"
 SORT_VENDOR = "V"
 SORT_ALPHA = "A"
+SORT_DYNAMIC = "d"
 
 
 # ── macOS Native Interface (ctypes) ──────────────────────────────────────
@@ -693,6 +694,28 @@ _VENDOR_PATHS = {
 }
 
 
+_VENDOR_RDNS = {
+    "com.apple.": "Apple",
+    "com.microsoft.": "Microsoft",
+    "com.google.": "Google",
+    "com.docker.": "Docker",
+    "org.mozilla.": "Mozilla",
+}
+
+
+def _get_vendor(command):
+    """Extract vendor name from command path, or 'No Vendor'."""
+    for prefix, v in _VENDOR_PATHS.items():
+        if command.startswith(prefix):
+            return v
+    # Match reverse-DNS names anywhere in the command
+    # (e.g. "com.apple.weather.menu" or "Contents/Library/.../com.microsoft.teams2.agent")
+    for prefix, v in _VENDOR_RDNS.items():
+        if prefix in command:
+            return v
+    return "No Vendor"
+
+
 def _short_command(command):
     """Shorten a command path to just the binary name with vendor tag."""
     vendor = ""
@@ -714,6 +737,13 @@ def _short_command(command):
     else:
         parts = command.split()
         name = parts[0].rsplit("/", 1)[-1]
+
+    # Check reverse-DNS patterns anywhere in command for vendor tag
+    if not vendor:
+        for prefix, v in _VENDOR_RDNS.items():
+            if prefix in command:
+                vendor = v
+                break
 
     if vendor:
         return f"{name} [{vendor}]"
@@ -790,6 +820,61 @@ def build_tree(matched, all_procs, sort_key, reverse=True):
     return sorted([build_node(r) for r in roots], key=sort_key, reverse=reverse)
 
 
+def build_vendor_tree(matched, all_procs, sort_key, reverse=True):
+    """Build a tree grouped by vendor at the top level.
+
+    Each vendor becomes a synthetic root node whose children are the normal
+    process trees for that vendor's processes.  Sorting applies both at the
+    vendor level (by aggregate) and within each vendor group.
+    """
+    from collections import OrderedDict
+
+    # First build the normal tree so we get proper parent-child relationships
+    normal_tree = build_tree(matched, all_procs, sort_key, reverse)
+
+    # Group root nodes by vendor
+    vendor_groups = OrderedDict()
+    for node in normal_tree:
+        vendor = _get_vendor(node["command"])
+        vendor_groups.setdefault(vendor, []).append(node)
+
+    result = []
+    for vendor, nodes in vendor_groups.items():
+        if len(nodes) == 1 and vendor == "No Vendor":
+            # Don't wrap single unvendored processes
+            result.append(nodes[0])
+            continue
+        # Create synthetic vendor root
+        leader = nodes[0]
+        vnode = {**leader}
+        vnode["command"] = vendor
+        vnode["pid"] = -abs(hash(vendor)) % 1000000 - 1  # stable synthetic PID per vendor
+        vnode["ppid"] = 0
+        vnode["depth"] = 0
+        vnode["children"] = nodes
+        vnode["vendor_group"] = True
+        # Aggregate across all member trees
+        vnode["rss_kb"] = sum(n.get("rss_kb", 0) for n in nodes)
+        vnode["cpu"] = sum(n.get("cpu", 0) for n in nodes)
+        vnode["cpu_ticks"] = sum(n.get("cpu_ticks", 0) for n in nodes)
+        vnode["threads"] = sum(n.get("threads", 0) for n in nodes)
+        vnode["agg_rss_kb"] = sum(n.get("agg_rss_kb", n.get("rss_kb", 0)) for n in nodes)
+        vnode["agg_cpu"] = sum(n.get("agg_cpu", n.get("cpu", 0)) for n in nodes)
+        vnode["agg_cpu_ticks"] = sum(n.get("agg_cpu_ticks", 0) for n in nodes)
+        vnode["agg_threads"] = sum(n.get("agg_threads", n.get("threads", 0)) for n in nodes)
+        vnode["agg_forks"] = len(nodes) + sum(n.get("agg_forks", 0) for n in nodes)
+        vnode["agg_net_in"] = sum(n.get("agg_net_in", 0) for n in nodes)
+        vnode["agg_net_out"] = sum(n.get("agg_net_out", 0) for n in nodes)
+        vnode["agg_bytes_in"] = sum(n.get("agg_bytes_in", 0) for n in nodes)
+        vnode["agg_bytes_out"] = sum(n.get("agg_bytes_out", 0) for n in nodes)
+        for key in ("net_in", "net_out", "bytes_in", "bytes_out"):
+            vnode[key] = sum(n.get(key, 0) for n in nodes)
+        vnode["sibling_count"] = len(nodes)
+        result.append(vnode)
+
+    return sorted(result, key=sort_key, reverse=reverse)
+
+
 def _group_siblings(children):
     """Group sibling nodes that share the same short command name into a
     synthetic parent with the original members as its children."""
@@ -811,6 +896,7 @@ def _group_siblings(children):
         group = {**leader}
         group["command"] = leader["command"]
         group["pid"] = leader["pid"]  # use first PID for expand/collapse
+        group["sibling_count"] = len(members)
         group["children"] = members    # original members are now children
         # Recompute aggregates across all members
         group["rss_kb"] = sum(m["rss_kb"] for m in members)
@@ -887,6 +973,8 @@ class ProcMonUI:
         self.net_rates = {}
         self.sort_mode = SORT_MEM
         self._sort_inverted = False
+        self._dynamic_sort = False  # threshold-exceeding processes bubble to top
+        self._vendor_grouped = False  # group processes by vendor at top level
         self._prev_cpu = {}  # pid -> (cpu_ns, monotonic_time)
         self._collapsed = set()  # PIDs whose children are hidden
         self._expanded = set()  # PIDs explicitly expanded by user
@@ -950,6 +1038,8 @@ class ProcMonUI:
                     self._alert_thresholds[k] = v
             self._alert_interval = cfg.get("alert_interval", self._alert_interval)
             self._alert_max_count = cfg.get("alert_max_count", self._alert_max_count)
+            self._dynamic_sort = cfg.get("dynamic_sort", self._dynamic_sort)
+            self._vendor_grouped = cfg.get("vendor_grouped", self._vendor_grouped)
         except (FileNotFoundError, ValueError, KeyError):
             pass
 
@@ -959,6 +1049,8 @@ class ProcMonUI:
             "alert_thresholds": self._alert_thresholds,
             "alert_interval": self._alert_interval,
             "alert_max_count": self._alert_max_count,
+            "dynamic_sort": self._dynamic_sort,
+            "vendor_grouped": self._vendor_grouped,
         }
         try:
             with open(self._CONFIG_PATH, "w") as f:
@@ -966,7 +1058,34 @@ class ProcMonUI:
         except OSError:
             pass
 
-    def _sort_key(self):
+    def _exceeds_threshold(self, p):
+        """Check if a process (or its aggregates) exceeds any alert threshold."""
+        t = self._alert_thresholds
+        if not any(v > 0 for v in t.values()):
+            return False
+        agg_cpu = p.get("agg_cpu", p.get("cpu", 0))
+        agg_mem_mb = p.get("agg_rss_kb", p.get("rss_kb", 0)) / 1024.0
+        agg_thr = p.get("agg_threads", p.get("threads", 0))
+        fds = p.get("fds", 0)
+        forks = p.get("forks", 0)
+        net_in = p.get("agg_net_in", max(p.get("net_in", 0), 0)) / 1024.0
+        net_out = p.get("agg_net_out", max(p.get("net_out", 0), 0)) / 1024.0
+        recv_mb = p.get("agg_bytes_in", p.get("bytes_in", 0)) / (1024 * 1024)
+        sent_mb = p.get("agg_bytes_out", p.get("bytes_out", 0)) / (1024 * 1024)
+        return (
+            (t["cpu"] > 0 and agg_cpu >= t["cpu"])
+            or (t["mem_mb"] > 0 and agg_mem_mb >= t["mem_mb"])
+            or (t["threads"] > 0 and agg_thr > t["threads"])
+            or (t["fds"] > 0 and fds > t["fds"])
+            or (t["forks"] > 0 and forks > t["forks"])
+            or (t["net_in"] > 0 and net_in > t["net_in"])
+            or (t["net_out"] > 0 and net_out > t["net_out"])
+            or (t["recv_mb"] > 0 and recv_mb > t["recv_mb"])
+            or (t["sent_mb"] > 0 and sent_mb > t["sent_mb"])
+        )
+
+    def _secondary_sort_key(self):
+        """Return the sort key for the user-selected sort mode."""
         if self.sort_mode == SORT_CPU:
             return lambda p: p.get("agg_cpu", p["cpu"])
         if self.sort_mode == SORT_NET:
@@ -980,6 +1099,27 @@ class ProcMonUI:
         if self.sort_mode == SORT_ALPHA:
             return lambda p: _short_command(p["command"]).lower()
         return lambda p: p.get("agg_rss_kb", p["rss_kb"])
+
+    def _sort_key(self):
+        secondary = self._secondary_sort_key()
+        if not self._dynamic_sort:
+            return secondary
+        # Dynamic sort: threshold-exceeding processes get priority (appear first).
+        # Since the caller applies reverse=True for descending numeric sorts,
+        # we flip the group flag so exceeding processes always come first.
+        exceeds = self._exceeds_threshold
+        reverse = self._sort_reverse()
+
+        def dynamic_key(p):
+            val = secondary(p)
+            # When reverse=True, higher tuples come first → exceeding = 1, normal = 0
+            # When reverse=False, lower tuples come first → exceeding = 0, normal = 1
+            if reverse:
+                group = 1 if exceeds(p) else 0
+            else:
+                group = 0 if exceeds(p) else 1
+            return (group, val)
+        return dynamic_key
 
     def _set_sort(self, mode):
         if self.sort_mode == mode:
@@ -1013,6 +1153,7 @@ class ProcMonUI:
             del self._prev_cpu[k]
 
     def collect_data(self):
+        sel_pid = self.rows[self.selected]["pid"] if self.rows and self.selected < len(self.rows) else None
         all_procs = get_all_processes()
         self._compute_cpu_deltas(all_procs)
 
@@ -1049,7 +1190,8 @@ class ProcMonUI:
                    if (not self.patterns or any(pat in p["command"].lower() for pat in self.patterns))
                    and not any(pat in p["command"].lower() for pat in self.exclude_patterns)]
 
-        tree = build_tree(matched, all_procs, self._sort_key(), self._sort_reverse())
+        _build = build_vendor_tree if self._vendor_grouped else build_tree
+        tree = _build(matched, all_procs, self._sort_key(), self._sort_reverse())
         flat = flatten_tree(tree, self._expanded)
         all_display_pids = [r["pid"] for r in flat]
 
@@ -1074,6 +1216,13 @@ class ProcMonUI:
         self.rows = flat
         self._all_procs = matched
         self.matched_count = len(matched)
+
+        # Restore selection by PID
+        if sel_pid is not None:
+            for i, r in enumerate(self.rows):
+                if r["pid"] == sel_pid:
+                    self.selected = i
+                    break
         if self.selected >= len(self.rows):
             self.selected = max(0, len(self.rows) - 1)
 
@@ -1112,7 +1261,9 @@ class ProcMonUI:
         sort_color = {SORT_MEM: curses.color_pair(3), SORT_CPU: curses.color_pair(5),
                       SORT_NET: curses.color_pair(9)}.get(self.sort_mode, curses.color_pair(3))
         sort_arrow = "\u2191" if not self._sort_reverse() else "\u2193"
-        self._put(y, x, f"\u2014 sort: {sort_label}{sort_arrow} ", sort_color | curses.A_BOLD)
+        dyn_tag = " [dyn]" if self._dynamic_sort else ""
+        grp_tag = " [vendor]" if self._vendor_grouped else ""
+        self._put(y, x, f"\u2014 sort: {sort_label}{sort_arrow}{dyn_tag}{grp_tag} ", sort_color | curses.A_BOLD)
         y += 1
 
         # ── Totals ──
@@ -1191,28 +1342,79 @@ class ProcMonUI:
             self.scroll_offset = self.selected - list_h + 1
 
         visible = self.rows[self.scroll_offset : self.scroll_offset + list_h]
-        mem_red = 2 * 1024 * 1024      # 2 GB in KB
-        mem_yellow = 1536 * 1024        # 1.5 GB in KB
+        t = self._alert_thresholds
+        # Precompute right-side column widths for per-cell coloring
+        # right_parts order: PID(7) PPID(7) MEM(9) CPU(7) THR(4) [FDs(5)] Forks(6) In(10) Out(10) Recv(10) Sent(10)
+        col_widths = [7, 7, 9, 7, 4]
+        if not self.skip_fd:
+            col_widths.append(5)
+        col_widths += [6, 10, 10, 10, 10]
+        # Total right width including separating spaces
+        right_total = sum(col_widths) + len(col_widths) - 1
+        right_start = w - right_total - 1  # x where right columns begin
+
         for i, r in enumerate(visible):
             idx = self.scroll_offset + i
             line = self._fmt_row(r, w)
             agg_mem = r.get("agg_rss_kb", r["rss_kb"])
             agg_cpu = r.get("agg_cpu", r["cpu"])
+            agg_mem_mb = agg_mem / 1024.0
+            r_thr = r.get("agg_threads", r["threads"])
+            r_fds = r.get("fds", 0)
+            r_forks = r.get("forks", 0)
+            r_net_in_kb = r.get("agg_net_in", max(r.get("net_in", 0), 0)) / 1024.0
+            r_net_out_kb = r.get("agg_net_out", max(r.get("net_out", 0), 0)) / 1024.0
+            r_recv_mb = r.get("agg_bytes_in", r.get("bytes_in", 0)) / (1024 * 1024)
+            r_sent_mb = r.get("agg_bytes_out", r.get("bytes_out", 0)) / (1024 * 1024)
+
+            # Base row color (no longer full-row red)
             if idx == self.selected:
                 self._put(y, 0, line.ljust(w)[:w], curses.color_pair(2))
-            elif (agg_mem >= mem_red or agg_cpu >= 80
-                  or r.get("agg_forks", 0) > 15
-                  or r.get("agg_fds", 0) > 1025
-                  or r.get("agg_threads", 0) > 250):
-                self._put(y, 0, line[:w], curses.color_pair(5) | curses.A_BOLD)
-            elif agg_mem >= mem_yellow or agg_cpu >= 40:
-                self._put(y, 0, line[:w], curses.color_pair(6) | curses.A_BOLD)
             elif r["depth"] > 0:
                 self._put(y, 0, line[:w], curses.color_pair(10))
             elif agg_cpu > 5 or agg_mem > 512 * 1024:
                 self._put(y, 0, line[:w], curses.color_pair(11))
             else:
                 self._put(y, 0, line[:w], curses.A_NORMAL)
+
+            # Overlay per-cell red/yellow for individual metrics that exceed thresholds
+            if idx != self.selected:
+                # Build list: (column_index, exceeds, warning)
+                # Column indices: 0=PID 1=PPID 2=MEM 3=CPU 4=THR 5=FDs(opt) 6/5=Forks 7/6=In 8/7=Out 9/8=Recv 10/9=Sent
+                fd_offset = 1 if not self.skip_fd else 0
+                checks = []
+                if t["mem_mb"] > 0:
+                    checks.append((2, agg_mem_mb >= t["mem_mb"], agg_mem_mb >= t["mem_mb"] * 0.8))
+                if t["cpu"] > 0:
+                    checks.append((3, agg_cpu >= t["cpu"], agg_cpu >= t["cpu"] * 0.8))
+                if t["threads"] > 0:
+                    checks.append((4, r_thr > t["threads"], r_thr >= t["threads"] * 0.8))
+                if t["fds"] > 0 and not self.skip_fd:
+                    checks.append((5, r_fds > t["fds"], r_fds >= t["fds"] * 0.8))
+                if t["forks"] > 0:
+                    checks.append((5 + fd_offset, r_forks > t["forks"], r_forks >= t["forks"] * 0.8))
+                if t["net_in"] > 0:
+                    checks.append((6 + fd_offset, r_net_in_kb > t["net_in"], r_net_in_kb >= t["net_in"] * 0.8))
+                if t["net_out"] > 0:
+                    checks.append((7 + fd_offset, r_net_out_kb > t["net_out"], r_net_out_kb >= t["net_out"] * 0.8))
+                if t["recv_mb"] > 0:
+                    checks.append((8 + fd_offset, r_recv_mb > t["recv_mb"], r_recv_mb >= t["recv_mb"] * 0.8))
+                if t["sent_mb"] > 0:
+                    checks.append((9 + fd_offset, r_sent_mb > t["sent_mb"], r_sent_mb >= t["sent_mb"] * 0.8))
+
+                for col_idx, exceeds, warning in checks:
+                    if not warning:
+                        continue
+                    # Compute x position of this column
+                    cx = right_start
+                    for ci in range(col_idx):
+                        cx += col_widths[ci] + 1  # +1 for separator space
+                    cw = col_widths[col_idx]
+                    cell_text = line[cx:cx + cw] if cx < len(line) else ""
+                    if cell_text:
+                        attr = curses.color_pair(5) | curses.A_BOLD if exceeds else curses.color_pair(6) | curses.A_BOLD
+                        self._put(y, cx, cell_text[:w - cx], attr)
+
             # Overlay colored tree prefix and collapse indicator
             prefix = r["prefix"]
             if prefix:
@@ -1289,7 +1491,11 @@ class ProcMonUI:
             indicator = "\u25b6 " if r["is_collapsed"] else "\u25bc "
         else:
             indicator = "  "
-        left = r["prefix"] + indicator + _short_command(r["command"])
+        short = _short_command(r["command"])
+        count = r.get("sibling_count", 0)
+        if count > 1:
+            short += f" ({count})"
+        left = r["prefix"] + indicator + short
         if len(left) > left_w:
             left = left[: left_w - 1] + "\u2026"
         return f" {left:<{left_w}} {right}"
@@ -1494,6 +1700,8 @@ class ProcMonUI:
                 ("V", "Vendor"),
                 ("R", "\u2193In"),
                 ("O", "\u2191Out"),
+                ("d", "Dyn" if not self._dynamic_sort else "Dyn\u2713"),
+                ("g", "Grp" if not self._vendor_grouped else "Grp\u2713"),
                 ("N", "Conns"),
                 ("f", "Filter"),
                 ("C", "Config"),
@@ -1591,6 +1799,12 @@ class ProcMonUI:
             self._set_sort(SORT_BYTES_IN)
         elif key == ord("O"):
             self._set_sort(SORT_BYTES_OUT)
+        elif key == ord("d"):
+            self._dynamic_sort = not self._dynamic_sort
+            self._resort()
+        elif key == ord("g"):
+            self._vendor_grouped = not self._vendor_grouped
+            self._resort()
         elif key == ord("N"):
             self._toggle_net_mode()
         elif key == ord("\t"):
@@ -2070,12 +2284,6 @@ class ProcMonUI:
         if not any(v > 0 for v in t.values()):
             return
         now = time.monotonic()
-        # Respect max count
-        if self._alert_max_count > 0 and self._alert_count >= self._alert_max_count:
-            return
-        # Cooldown based on configured interval
-        if now - self._alert_last_sound < self._alert_interval:
-            return
         # System-wide totals from all matched processes (not just visible rows)
         procs = getattr(self, "_all_procs", self.rows)
         total_cpu = sum(p.get("cpu", 0) for p in procs)
@@ -2100,9 +2308,17 @@ class ProcMonUI:
             or (t["sent_mb"] > 0 and total_sent_mb > t["sent_mb"])
         )
         if not triggered:
-            # Reset count and timer when no longer triggered
-            self._alert_count = 0
-            self._alert_last_sound = 0.0
+            # Only reset after a sustained period of non-triggering (one full interval)
+            # so that brief dips below threshold don't reset the counter
+            if self._alert_last_sound > 0 and now - self._alert_last_sound >= self._alert_interval:
+                self._alert_count = 0
+                self._alert_last_sound = 0.0
+            return
+        # Respect max count (checked after triggered so reset above always runs)
+        if self._alert_max_count > 0 and self._alert_count >= self._alert_max_count:
+            return
+        # Cooldown based on configured interval
+        if now - self._alert_last_sound < self._alert_interval:
             return
         self._alert_last_sound = now
         self._alert_count += 1
@@ -2243,7 +2459,8 @@ class ProcMonUI:
                    if (not self.patterns or any(pat in p["command"].lower() for pat in self.patterns))
                    and not any(pat in p["command"].lower() for pat in self.exclude_patterns)]
 
-        tree = build_tree(matched, all_procs, self._sort_key(), self._sort_reverse())
+        _build = build_vendor_tree if self._vendor_grouped else build_tree
+        tree = _build(matched, all_procs, self._sort_key(), self._sort_reverse())
         flat = flatten_tree(tree, self._expanded)
 
         # Carry over fds and cwd from previous rows
