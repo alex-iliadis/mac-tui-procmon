@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""procmon - resilient process monitor for macOS.
+"""secprocmon — Security Process Monitor for macOS.
 
 Uses macOS libproc/sysctl directly via ctypes for process inspection,
 avoiding fork()/exec() so the monitor survives fork bombs and memory
@@ -294,7 +294,7 @@ _EXTERNAL_TOOLS = [
 def _check_external_tools():
     """Scan for missing external CLI dependencies via shutil.which (no fork).
 
-    Uses the augmented user-tool PATH so sudo-run procmon doesn't falsely
+    Uses the augmented user-tool PATH so sudo-run secprocmon doesn't falsely
     report claude/codex/gemini as missing just because sudo sanitized PATH.
 
     Returns a list of (tool, category, feature_desc, install_hint) tuples for
@@ -314,13 +314,13 @@ def _render_preflight_report(missing, stream=None):
     order = {"critical": 0, "important": 1, "optional": 2}
     missing_sorted = sorted(missing, key=lambda t: order.get(t[1], 99))
     print("", file=stream)
-    print("procmon preflight \u2014 some external tools are missing", file=stream)
+    print("secprocmon preflight \u2014 some external tools are missing", file=stream)
     print("", file=stream)
     for tool, category, feature_desc, install_hint in missing_sorted:
         print(f"  [{category}] {tool:<10} \u2014 {feature_desc}", file=stream)
         print(f"              install: {install_hint}", file=stream)
     print("", file=stream)
-    print("procmon will run in DEGRADED mode. Missing features will be skipped", file=stream)
+    print("secprocmon will run in DEGRADED mode. Missing features will be skipped", file=stream)
     print("at runtime with a short error message instead of an analysis result.", file=stream)
     print("", file=stream)
 
@@ -1407,7 +1407,7 @@ def _delete_tcc_grant(client, service, db_path, logger=None):
     if short_name and shutil.which("tccutil"):
         # We try two env contexts because tccutil picks the TCC.db it
         # targets based on HOME/USER:
-        #   1. Current env — when run via `sudo procmon` with HOME
+        #   1. Current env — when run via `sudo secprocmon` with HOME
         #      preserved, this targets the user's per-user TCC.db.
         #   2. Root env — HOME=/var/root, no USER/LOGNAME. Forces tccutil
         #      to target the SYSTEM TCC.db at /Library/Application Support/
@@ -1555,9 +1555,9 @@ def _remove_bundle(path):
 def _effective_home():
     """Return the invoking user's HOME, respecting sudo.
 
-    When procmon is launched with `sudo procmon`, $HOME resolves to /var/root
+    When secprocmon is launched with `sudo secprocmon`, $HOME resolves to /var/root
     — so anything living in the real user's home (YARA rules at
-    ~/.procmon.yar, Claude's auth at ~/.claude, npm global bin, etc.) is
+    ~/.secprocmon.yar, Claude's auth at ~/.claude, npm global bin, etc.) is
     invisible. This helper falls back to SUDO_USER's home in that case so
     per-user config and credentials stay reachable.
 
@@ -1582,7 +1582,7 @@ _EFFECTIVE_HOME = _effective_home()
 
 def _build_user_tool_path():
     """Return an augmented PATH so user-installed CLIs (claude, codex, gemini,
-    yara, etc.) remain reachable when procmon is started with sudo.
+    yara, etc.) remain reachable when secprocmon is started with sudo.
 
     sudo resets PATH to a sanitized system-only value, which hides Homebrew
     and npm-global locations. We rebuild those from SUDO_USER's home plus
@@ -1953,14 +1953,14 @@ def _virustotal_lookup(sha256, api_key=None, timeout=10):
 
 # ── YARA scanning ──────────────────────────────────────────────────────────
 
-_DEFAULT_YARA_RULES_PATH = os.path.join(_EFFECTIVE_HOME, ".procmon.yar")
+_DEFAULT_YARA_RULES_PATH = os.path.join(_EFFECTIVE_HOME, ".secprocmon.yar")
 
 
 def _yara_scan_file(path, rules_path=None, timeout=15):
     """Scan a file on disk with `yara`. Returns list of matched rule names.
 
     Shells out to `yara` CLI (no Python dep required). Uses
-    `~/.procmon.yar` as the default rule file; gracefully returns [] if
+    `~/.secprocmon.yar` as the default rule file; gracefully returns [] if
     yara or the rules file is missing.
     """
     if not path or not os.path.exists(path):
@@ -1996,7 +1996,7 @@ def _yara_scan_memory(pid, rules_path=None, timeout=60,
     if not os.path.exists(rules):
         return {"success": False,
                 "error": f"no yara rules file at {rules} — create one or set rules_path"}
-    core_path = os.path.join(core_dir, f"procmon.core.{pid}")
+    core_path = os.path.join(core_dir, f"secprocmon.core.{pid}")
     lldb_script = (
         f"process save-core {core_path}\n"
         "detach\n"
@@ -2342,7 +2342,7 @@ def _port_service(port):
 
 #: PIDs that never appear in the tree — their children surface as top-level
 #: roots instead. launchd (PID 1) is the parent of most of the system when
-#: procmon runs as root, so leaving it visible collapses everything under a
+#: secprocmon runs as root, so leaving it visible collapses everything under a
 #: single branch. PID 0 is the kernel task and is already excluded elsewhere.
 _PHANTOM_TREE_PARENTS = {1}
 
@@ -2539,13 +2539,13 @@ def flatten_tree(tree, expanded=None):
 #   flush_dns               — dscacheutil -flushcache; killall -HUP mDNSResponder
 #   restore_hosts           — quarantine /etc/hosts and restore a stock file
 #   bootout_launchitem      — launchctl bootout <domain> <plist>
-#   quarantine_plist        — mv a LaunchAgent/Daemon plist into ~/.procmon-quarantine
+#   quarantine_plist        — mv a LaunchAgent/Daemon plist into ~/.secprocmon-quarantine
 #   kill_process            — SIGTERM the owning PID (shared with keyscan)
 #   delete_tcc              — (shared with keyscan)
 #   remove_bundle           — (shared with keyscan)
 
 
-_QUARANTINE_DIR = os.path.join(_EFFECTIVE_HOME, ".procmon-quarantine")
+_QUARANTINE_DIR = os.path.join(_EFFECTIVE_HOME, ".secprocmon-quarantine")
 
 
 # ---- Sharing / firewall state --------------------------------------------
@@ -3900,7 +3900,7 @@ def _audit_kernel_boot():
     return findings
 
 
-# Apple macOS supported branches (rough, updated alongside procmon releases).
+# Apple macOS supported branches (rough, updated alongside secprocmon releases).
 # Used as a best-effort patch-posture check.
 _MACOS_SUPPORTED = {
     26: "Tahoe",
@@ -4045,7 +4045,7 @@ def _audit_tcc_grants():
     if not entries:
         findings.append({
             "severity": "INFO",
-            "message": ("TCC.db unreadable — procmon needs Full Disk Access "
+            "message": ("TCC.db unreadable — secprocmon needs Full Disk Access "
                         "to read TCC grants"),
             "evidence": ("System Settings → Privacy & Security → "
                          "Full Disk Access → add your terminal app"),
@@ -5078,12 +5078,12 @@ def _audit_package_managers():
 # ── Batch E: Baseline / Rule engine / Scoring ──────────────────────────
 
 
-_BASELINE_PATH = os.path.join(_EFFECTIVE_HOME, ".procmon-baseline.json")
+_BASELINE_PATH = os.path.join(_EFFECTIVE_HOME, ".secprocmon-baseline.json")
 
 
 def _collect_baseline_snapshot():
     """Snapshot of host state: launch items, listeners, kexts, sysexts,
-    root CAs, profiles, sharing state. Written to ~/.procmon-baseline.json
+    root CAs, profiles, sharing state. Written to ~/.secprocmon-baseline.json
     on demand. Future audits can diff against this to surface only deltas.
     """
     import hashlib as _h
@@ -5154,7 +5154,7 @@ def _audit_baseline_delta():
         return [{
             "severity": "INFO",
             "message": ("No baseline captured yet. Run "
-                        "procmon --capture-baseline to create one."),
+                        "secprocmon --capture-baseline to create one."),
             "action": {"type": "capture_baseline"},
         }]
     now = _collect_baseline_snapshot()
@@ -5238,7 +5238,7 @@ def _audit_baseline_delta():
 #    "message": "...",
 #    "params": {...}}
 # Each kind has its own evaluator. Ships with a small default set and can
-# be extended by dropping JSON files into ~/.procmon-rules.d/.
+# be extended by dropping JSON files into ~/.secprocmon-rules.d/.
 
 _DEFAULT_RULES = [
     {
@@ -5275,9 +5275,9 @@ _DEFAULT_RULES = [
 
 
 def _load_custom_rules():
-    """Load rules from ~/.procmon-rules.d/*.json (best-effort)."""
+    """Load rules from ~/.secprocmon-rules.d/*.json (best-effort)."""
     import json as _j
-    root = os.path.join(_EFFECTIVE_HOME, ".procmon-rules.d")
+    root = os.path.join(_EFFECTIVE_HOME, ".secprocmon-rules.d")
     if not os.path.isdir(root):
         return []
     out = []
@@ -5735,10 +5735,10 @@ class ProcMonUI:
         stdscr.timeout(100)
         self._load_config()
 
-    _CONFIG_PATH = os.path.expanduser("~/.procmon.json")
+    _CONFIG_PATH = os.path.expanduser("~/.secprocmon.json")
 
     def _load_config(self):
-        """Load saved config from ~/.procmon.json if it exists."""
+        """Load saved config from ~/.secprocmon.json if it exists."""
         try:
             with open(self._CONFIG_PATH) as f:
                 cfg = _json.loads(f.read())
@@ -5753,7 +5753,7 @@ class ProcMonUI:
             pass
 
     def _save_config(self):
-        """Save current config to ~/.procmon.json."""
+        """Save current config to ~/.secprocmon.json."""
         cfg = {
             "alert_thresholds": self._alert_thresholds,
             "alert_interval": self._alert_interval,
@@ -5971,7 +5971,7 @@ class ProcMonUI:
         # Render header with colored segments
         self._put(y, 0, " " * w, curses.color_pair(1))
         x = 0
-        self._put(y, x, " procmon ", curses.color_pair(1) | curses.A_BOLD)
+        self._put(y, x, " secprocmon ", curses.color_pair(1) | curses.A_BOLD)
         x = 9
         proc_str = f"\u2014 {n} process{'es' if n != 1 else ''}{filter_str} "
         self._put(y, x, proc_str, curses.color_pair(7))
@@ -8085,19 +8085,19 @@ class ProcMonUI:
                 "  Runs: dscacheutil -flushcache; killall -HUP mDNSResponder"),
             "restore_hosts": (
                 "Quarantine /etc/hosts and restore a stock file?\n"
-                "  Original will be saved in ~/.procmon-quarantine"),
+                "  Original will be saved in ~/.secprocmon-quarantine"),
             "bootout_launchitem": (
                 f"Bootout and quarantine this launch item?\n"
                 f"  plist:  {action.get('plist_path','')}\n"
                 f"  label:  {action.get('label','')}\n"
                 f"  domain: {action.get('domain','')}\n"
-                f"Plist will be moved to ~/.procmon-quarantine/"),
+                f"Plist will be moved to ~/.secprocmon-quarantine/"),
             "kill_process": (
                 f"SIGTERM the owning process?\n"
                 f"  pid: {action.get('pid')}\n"
                 f"  exe: {action.get('exe','(unknown)')}"),
             "capture_baseline": (
-                f"Snapshot host state to ~/.procmon-baseline.json?\n"
+                f"Snapshot host state to ~/.secprocmon-baseline.json?\n"
                 f"Subsequent baseline-delta audits will diff against it."),
             "run_software_update": (
                 "Install all pending macOS updates?\n"
@@ -8302,7 +8302,7 @@ class ProcMonUI:
         return False, f"unknown action: {a_type}"
 
     def _quarantine_file(self, path):
-        """Move a file to ~/.procmon-quarantine/<timestamp>-<basename>.
+        """Move a file to ~/.secprocmon-quarantine/<timestamp>-<basename>.
 
         Returns (ok, message). Creates the quarantine dir on first use.
         """
@@ -8408,12 +8408,12 @@ class ProcMonUI:
             else:
                 lines.append(
                     f"You are running as uid={euid}, not root. Use "
-                    f"`sudo procmon` — but note that sudo alone won't "
+                    f"`sudo secprocmon` — but note that sudo alone won't "
                     f"fix this: SIP protects TCC.db from writes even for "
                     f"root.")
             lines.append("")
             lines.append("To remove TCC grants you need Full Disk Access on")
-            lines.append("your terminal app (not on procmon itself):")
+            lines.append("your terminal app (not on secprocmon itself):")
             lines.append("  System Settings → Privacy & Security →")
             lines.append("  Full Disk Access → add your terminal app")
             lines.append("  → quit and relaunch the terminal → retry")
@@ -9130,7 +9130,7 @@ class ProcMonUI:
             self._append_event(
                 "error",
                 f"[{source} typically requires root on macOS \u2014 "
-                f"re-run with: sudo procmon]",
+                f"re-run with: sudo secprocmon]",
             )
 
         try:
@@ -9304,8 +9304,8 @@ class ProcMonUI:
         JSON flow record per line. Streams stdout into a reader thread
         that populates the ring buffer."""
         # Write the shim to a temp file keyed by our pid so multiple
-        # procmon instances don't stomp on each other.
-        shim_path = f"/tmp/procmon-mitm-shim-{os.getpid()}.py"
+        # secprocmon instances don't stomp on each other.
+        shim_path = f"/tmp/secprocmon-mitm-shim-{os.getpid()}.py"
         try:
             with open(shim_path, "w") as f:
                 f.write(self._MITM_SHIM)
@@ -9390,7 +9390,7 @@ class ProcMonUI:
             if "not found" in self._traffic_error:
                 lines.append("")
                 lines.append("  After install:")
-                lines.append("    1. Start procmon again and open Traffic Inspector")
+                lines.append("    1. Start secsecprocmon again and open Traffic Inspector")
                 lines.append("    2. Trust mitmproxy's CA:")
                 lines.append("       ~/.mitmproxy/mitmproxy-ca-cert.pem")
                 lines.append("    3. Route your suspect app through "
@@ -9517,7 +9517,7 @@ class ProcMonUI:
             if self._events_source and os.geteuid() != 0:
                 lines.append("")
                 lines.append("  [!] Most macOS event sources require root.")
-                lines.append("      Quit procmon and re-run with: sudo procmon")
+                lines.append("      Quit secprocmon and re-run with: sudo secprocmon")
             return lines
         for evt in snapshot[-200:]:
             ts = evt.get("ts", "")[:19]
@@ -10774,7 +10774,7 @@ class ProcMonUI:
         ("what does this mean?", "is this suspicious?", etc.) stay grounded in
         what's actually on screen rather than requiring the user to re-explain.
         """
-        label = "procmon"
+        label = "secprocmon"
         parts = []
 
         if self._inspect_mode and self._inspect_lines:
@@ -10928,7 +10928,7 @@ class ProcMonUI:
             try:
                 system_prompt = (
                     "You are a macOS security and process-analysis assistant "
-                    "embedded in procmon, a live process monitor. Answer the "
+                    "embedded in secprocmon, a Security Process Monitor. Answer the "
                     "user's question concisely and grounded in the context "
                     "they're looking at. Prefer bullet-point answers for "
                     "anything longer than two sentences. If the user asks "
@@ -11610,7 +11610,7 @@ class ProcMonUI:
 
 def main():
     parser = argparse.ArgumentParser(
-        prog="procmon",
+        prog="secprocmon",
         description=(
             "Resilient top-like process monitor filtered by name (macOS). "
             "Uses direct libproc/sysctl calls — no fork() required — so it "
@@ -11627,7 +11627,7 @@ def main():
                         help="Skip external tool dependency check at startup")
     parser.add_argument("--capture-baseline", action="store_true",
                         help=("Capture a host-state snapshot to "
-                              "~/.procmon-baseline.json and exit"))
+                              "~/.secprocmon-baseline.json and exit"))
     parser.add_argument("--audit", default="",
                         help=("Run a single audit headless and print results: "
                               "network|dns|persistence|system_hardening|"

@@ -1,12 +1,12 @@
-# procmon
+# Security Process Monitor (secprocmon)
 
-> A real-time macOS process monitor, security auditor, and forensic investigation tool — single file, zero dependencies.
+> A real-time macOS Security Process Monitor, security auditor, and forensic investigation tool — single file, zero dependencies.
 
 ---
 
 ## Table of Contents
 
-- [What is procmon?](#what-is-procmon)
+- [What is secprocmon?](#what-is-procmon)
 - [Quick Start](#quick-start)
 - [Feature Highlights](#feature-highlights)
   - [Global Security Score](#global-security-score)
@@ -30,22 +30,22 @@
 
 ---
 
-## What is procmon?
+## What is secprocmon?
 
-procmon is a terminal-based macOS process monitor that goes beyond `top` or `htop`. It combines a live process tree with a comprehensive security audit engine: 20 host-level checks, per-process forensic inspection powered by Claude + Codex + Gemini, keylogger detection, live exec/fork event streaming, and one-press remediations for every actionable finding — all in a single Python file with no external dependencies.
+secprocmon is a terminal-based macOS Security Process Monitor that goes beyond `top` or `htop`. It combines a live process tree with a comprehensive security audit engine: 20 host-level checks, per-process forensic inspection powered by Claude + Codex + Gemini, keylogger detection, live exec/fork event streaming, and one-press remediations for every actionable finding — all in a single Python file with no external dependencies.
 
 ---
 
 ## Quick Start
 
 ```bash
-sudo python3 procmon.py          # full features (audits need root for some checks)
-python3 procmon.py               # works without root, some checks degraded
-python3 procmon.py firefox -i 2  # monitor Firefox, refresh every 2s
-sudo python3 procmon.py --audit global_score   # headless score + fix-first list
+sudo python3 secprocmon.py          # full features (audits need root for some checks)
+python3 secprocmon.py               # works without root, some checks degraded
+python3 secprocmon.py firefox -i 2  # monitor Firefox, refresh every 2s
+sudo python3 secprocmon.py --audit global_score   # headless score + fix-first list
 ```
 
-On first launch, procmon checks for optional CLIs (`claude`, `codex`, `gemini`, `yara`, `mitmproxy`, etc.) and offers to install any that are missing. Pass `--skip-preflight` to bypass.
+On first launch, secprocmon checks for optional CLIs (`claude`, `codex`, `gemini`, `yara`, `mitmproxy`, etc.) and offers to install any that are missing. Pass `--skip-preflight` to bypass.
 
 ---
 
@@ -65,11 +65,11 @@ The AI Summary panel auto-generates after the scan completes — surfacing the t
 
 ### One-Press Remediation
 
-Findings marked `[x]` have a safe remediation wired up. Press `D` on any such finding to execute it — procmon shows exactly what it will run and asks for confirmation before touching anything.
+Findings marked `[x]` have a safe remediation wired up. Press `D` on any such finding to execute it — it shows exactly what it will run and asks for confirmation before touching anything.
 
 ![One-Press Remediation](screenshots/quarantine-dialog.png)
 
-Destructive actions (bootout plist, restore `/etc/hosts`) move the original to `~/.procmon-quarantine/<timestamp>-<name>` rather than deleting it, so recovery is a single `mv`.
+Destructive actions (bootout plist, restore `/etc/hosts`) move the original to `~/.secprocmon-quarantine/<timestamp>-<name>` rather than deleting it, so recovery is a single `mv`.
 
 ---
 
@@ -241,7 +241,7 @@ Press `?` from anywhere — main list, any audit view, inspect report, scan resu
 
 ## Alerts & Configuration
 
-Press `C` to configure system-wide alert thresholds. Settings persist to `~/.procmon.json`.
+Press `C` to configure system-wide alert thresholds. Settings persist to `~/.secprocmon.json`.
 
 ![Alert Configuration](screenshots/alert-config.png)
 
@@ -286,7 +286,7 @@ All 20 audits are available both interactively (`a` key) and headless (`--audit 
 | `auth_stack` | — | SecurityAgentPlugins codesign, AuthorizationDB rights, PAM config |
 | `packages` | — | npm globals (lifecycle hooks), Homebrew, Python site-packages, Cargo |
 | `baseline_delta` | — | Diffs against a snapshot from `--capture-baseline` |
-| `rule_engine` | — | JSON rule files from `~/.procmon-rules.d/` (path_exists, file_mode, etc.) |
+| `rule_engine` | — | JSON rule files from `~/.secprocmon-rules.d/` (path_exists, file_mode, etc.) |
 
 ---
 
@@ -346,7 +346,7 @@ All 20 audits are available both interactively (`a` key) and headless (`--audit 
 ## CLI Reference
 
 ```
-python3 procmon.py [name] [-i SECONDS] [--no-fd] [--skip-preflight]
+python3 secprocmon.py [name] [-i SECONDS] [--no-fd] [--skip-preflight]
                    [--capture-baseline] [--audit <name>]
 ```
 
@@ -356,16 +356,16 @@ python3 procmon.py [name] [-i SECONDS] [--no-fd] [--skip-preflight]
 | `-i`, `--interval` | Refresh interval in seconds (default: 5) |
 | `--no-fd` | Skip FD counting for faster updates |
 | `--skip-preflight` | Skip external-tool dependency check |
-| `--capture-baseline` | Snapshot host state to `~/.procmon-baseline.json` and exit |
+| `--capture-baseline` | Snapshot host state to `~/.secprocmon-baseline.json` and exit |
 | `--audit <name>` | Run a single audit headless, print findings to stdout |
 
 **Headless audit examples:**
 
 ```bash
-sudo python3 procmon.py --audit global_score    # 0–100 score + fix-first list
-sudo python3 procmon.py --audit tcc             # TCC grants, pipeable to grep
-sudo python3 procmon.py --audit network         # firewall + ports + sharing
-sudo python3 procmon.py --capture-baseline      # snapshot for future delta audits
+sudo python3 secprocmon.py --audit global_score    # 0–100 score + fix-first list
+sudo python3 secprocmon.py --audit tcc             # TCC grants, pipeable to grep
+sudo python3 secprocmon.py --audit network         # firewall + ports + sharing
+sudo python3 secprocmon.py --capture-baseline      # snapshot for future delta audits
 ```
 
 ---
@@ -376,7 +376,7 @@ sudo python3 procmon.py --capture-baseline      # snapshot for future delta audi
 - **Python 3** — no external dependencies (stdlib only)
 - **Root recommended** — some audits (vmmap, full TCC.db access, kext enumeration) need `sudo`
 
-**Optional CLIs** (procmon detects and degrades gracefully if missing):
+**Optional CLIs** (detected at startup; features degrade gracefully if missing):
 
 | Tool | Feature | Install |
 |------|---------|---------|
