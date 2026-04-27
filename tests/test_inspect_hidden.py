@@ -911,7 +911,7 @@ class TestForensicDialog:
         texts = " ".join(str(c.args[2]) if len(c.args) > 2 else "" for c in put.call_args_list)
         assert "F" in texts and "Process" in texts
         assert "N" in texts and "Net" in texts
-        assert "a" in texts and "SecAudit" in texts
+        assert "SecAudit" not in texts
         assert "Telemetry" not in texts
         assert "Posture" not in texts
         assert "Inspect" not in texts
@@ -1594,6 +1594,104 @@ class TestChatSubprocessPaths:
         assert "boom" in monitor._chat_pending
 
 
+class TestChatEndToEndReturnsAnswer:
+    """Regression coverage for "Ask Claude appears stuck on thinking…":
+    confirm the worker writes a response, the poller picks it up, and the
+    answer lands in the visible message list with the loading flag cleared.
+    """
+
+    @staticmethod
+    def _immediate_thread(target=None, daemon=None, **kw):
+        t = MagicMock()
+        t.start = lambda: target()
+        return t
+
+    def test_full_success_flow_message_visible_and_not_loading(self, monitor):
+        import subprocess
+        monitor._chat_mode = True
+        monitor._chat_input = "what is this?"
+        monitor._chat_cursor = len(monitor._chat_input)
+
+        fake = MagicMock()
+        fake.communicate.return_value = (b"hello world", b"")
+        fake.returncode = 0
+
+        with patch("subprocess.Popen", return_value=fake) as popen, \
+             patch("threading.Thread",
+                   side_effect=self._immediate_thread):
+            monitor._chat_send()
+
+        assert monitor._chat_pending == "hello world"
+        assert monitor._chat_loading is True
+        # Argv carries --no-session-persistence to skip slow startup.
+        popen_argv = popen.call_args[0][0]
+        assert "--no-session-persistence" in popen_argv
+
+        changed = monitor._poll_chat_result()
+        assert changed is True
+        assert monitor._chat_pending is None
+        assert monitor._chat_loading is False
+        replies = [m for m in monitor._chat_messages
+                   if m["role"] == "assistant"]
+        assert replies, "expected an assistant reply in chat history"
+        assert replies[-1]["content"] == "hello world"
+
+    def test_timeout_path_sets_marker_and_kills_proc(self, monitor):
+        import subprocess
+        monitor._chat_mode = True
+        monitor._chat_input = "q"
+        monitor._chat_cursor = 1
+
+        fake = MagicMock()
+        fake.communicate.side_effect = subprocess.TimeoutExpired(
+            ["claude"], 90)
+
+        with patch("subprocess.Popen", return_value=fake), \
+             patch("threading.Thread",
+                   side_effect=self._immediate_thread):
+            monitor._chat_send()
+
+        assert monitor._chat_pending is not None
+        assert "timed out" in monitor._chat_pending
+        fake.kill.assert_called_once()
+        # Default timeout dropped from 300s → 90s; the marker reports it.
+        assert "90s" in monitor._chat_pending
+
+        # Poll still hands the marker to the message list so the user
+        # sees *something* instead of being stuck on the spinner forever.
+        changed = monitor._poll_chat_result()
+        assert changed is True
+        assert monitor._chat_loading is False
+        assert any("timed out" in m["content"]
+                   for m in monitor._chat_messages
+                   if m["role"] == "assistant")
+
+    def test_enter_chat_mode_drives_full_flow_to_visible_answer(self,
+                                                                 monitor):
+        """Integration: the '?' shortcut path (`_enter_chat_mode`) must
+        end with the assistant reply visible after one poll."""
+        monitor.rows = [make_proc(pid=99, command="/bin/test")]
+        monitor.selected = 0
+
+        fake = MagicMock()
+        fake.communicate.return_value = (b"this is the answer", b"")
+        fake.returncode = 0
+
+        with patch("subprocess.Popen", return_value=fake), \
+             patch("threading.Thread",
+                   side_effect=self._immediate_thread):
+            monitor._enter_chat_mode()
+
+        assert monitor._chat_mode is True
+        # Auto-opener question is appended as a user message.
+        assert monitor._chat_messages[0]["role"] == "user"
+        assert "Tell me more" in monitor._chat_messages[0]["content"]
+
+        monitor._poll_chat_result()
+        replies = [m for m in monitor._chat_messages
+                   if m["role"] == "assistant"]
+        assert replies and replies[-1]["content"] == "this is the answer"
+        assert monitor._chat_loading is False
 
 
 

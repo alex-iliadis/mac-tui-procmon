@@ -1523,7 +1523,7 @@ def _effective_home():
 # Cached at module load; process restart picks up new sudo state.
 _EFFECTIVE_HOME = _effective_home()
 _CHAT_TIMEOUT_SECS = max(
-    60, int(os.environ.get("MAC_TUI_PROCMON_CHAT_TIMEOUT", "300"))
+    30, int(os.environ.get("MAC_TUI_PROCMON_CHAT_TIMEOUT", "90"))
 )
 
 
@@ -4429,7 +4429,6 @@ class ProcMonUI:
                 ("F", "Process"),
                 ("N", "Net"),
                 ("T", "Triage"),
-                ("a", "SecAudit"),
                 ("?", "Ask"),
                 ("L", "Log"),
                 ("f", "Filter"),
@@ -8812,6 +8811,7 @@ class ProcMonUI:
                     [
                         "claude",
                         "-p",
+                        "--no-session-persistence",
                         "--dangerously-skip-permissions",
                         "--add-dir",
                         "/",
