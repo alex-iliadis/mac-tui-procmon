@@ -42,15 +42,6 @@ class TestInspectModeToggle:
         assert monitor._net_mode is False
         assert monitor._inspect_mode is True
 
-    def test_toggle_on_closes_hidden_mode(self, monitor):
-        monitor.rows = [make_proc(pid=100, command="/usr/bin/test")]
-        monitor.selected = 0
-        monitor._hidden_scan_mode = True
-        with patch.object(monitor, "_start_inspect_fetch"):
-            monitor._toggle_inspect_mode()
-        assert monitor._hidden_scan_mode is False
-        assert monitor._inspect_mode is True
-
     def test_toggle_no_rows(self, monitor):
         monitor.rows = []
         monitor._toggle_inspect_mode()
@@ -588,168 +579,6 @@ class TestCheckHiddenPidsQuick:
         assert 0 not in hidden
 
 
-class TestCheckHiddenPidsNetwork:
-    def test_parses_lsof(self):
-        lsof_out = b"COMMAND  PID  USER  FD  TYPE  DEVICE  SIZE  NODE  NAME\nfoo  42  user  3u  IPv4  0x0  0t0  TCP  *:80\n"
-        mock_proc = MagicMock()
-        mock_proc.communicate.return_value = (lsof_out, b"")
-        with patch("subprocess.Popen", return_value=mock_proc):
-            pids = procmon._check_hidden_pids_network()
-        assert 42 in pids
-
-    def test_lsof_failure(self):
-        with patch("subprocess.Popen", side_effect=FileNotFoundError):
-            pids = procmon._check_hidden_pids_network()
-        assert pids == set()
-
-
-# ── Hidden Scan Toggle ─────────────────────────────────────────────────
-
-
-class TestHiddenScanToggle:
-    def test_toggle_on(self, monitor):
-        with patch.object(monitor, "_start_hidden_scan"):
-            monitor._toggle_hidden_scan_mode()
-        assert monitor._hidden_scan_mode is True
-        assert monitor._detail_focus is True
-        assert monitor._hidden_scan_loading is True
-
-    def test_toggle_off(self, monitor):
-        monitor._hidden_scan_mode = True
-        monitor._detail_focus = True
-        monitor._toggle_hidden_scan_mode()
-        assert monitor._hidden_scan_mode is False
-        assert monitor._detail_focus is False
-
-    def test_toggle_closes_net_mode(self, monitor):
-        monitor._net_mode = True
-        with patch.object(monitor, "_start_hidden_scan"):
-            monitor._toggle_hidden_scan_mode()
-        assert monitor._net_mode is False
-
-    def test_toggle_closes_inspect_mode(self, monitor):
-        monitor._inspect_mode = True
-        with patch.object(monitor, "_start_hidden_scan"):
-            monitor._toggle_hidden_scan_mode()
-        assert monitor._inspect_mode is False
-
-
-class TestHiddenScanPollResult:
-    def test_poll_applies(self, monitor):
-        monitor._hidden_scan_mode = True
-        monitor._hidden_scan_loading = True
-        monitor._hidden_scan_pending = ["finding 1", "finding 2"]
-        result = monitor._poll_hidden_scan_result()
-        assert result is True
-        assert monitor._hidden_scan_lines == ["finding 1", "finding 2"]
-        assert monitor._hidden_scan_loading is False
-
-    def test_poll_when_closed(self, monitor):
-        monitor._hidden_scan_mode = False
-        monitor._hidden_scan_pending = ["data"]
-        result = monitor._poll_hidden_scan_result()
-        assert result is False
-        assert monitor._hidden_scan_pending is None
-
-    def test_poll_nothing_pending(self, monitor):
-        monitor._hidden_scan_pending = None
-        result = monitor._poll_hidden_scan_result()
-        assert result is False
-
-
-# ── Hidden Scan Input Handling ─────────────────────────────────────────
-
-
-class TestHiddenScanInputHandling:
-    def test_scroll_down(self, monitor):
-        monitor._detail_focus = True
-        monitor._hidden_scan_mode = True
-        monitor._hidden_scan_scroll = 0
-        monitor.handle_input(curses.KEY_DOWN)
-        assert monitor._hidden_scan_scroll == 1
-
-    def test_scroll_up(self, monitor):
-        monitor._detail_focus = True
-        monitor._hidden_scan_mode = True
-        monitor._hidden_scan_scroll = 5
-        monitor.handle_input(curses.KEY_UP)
-        assert monitor._hidden_scan_scroll == 4
-
-    def test_scroll_up_clamps(self, monitor):
-        monitor._detail_focus = True
-        monitor._hidden_scan_mode = True
-        monitor._hidden_scan_scroll = 0
-        monitor.handle_input(curses.KEY_UP)
-        assert monitor._hidden_scan_scroll == 0
-
-    def test_close_with_H(self, monitor):
-        monitor._detail_focus = True
-        monitor._hidden_scan_mode = True
-        with patch.object(monitor, "_toggle_hidden_scan_mode") as toggle:
-            monitor.handle_input(ord("H"))
-        toggle.assert_called_once()
-
-    def test_tab_unfocuses(self, monitor):
-        monitor._detail_focus = True
-        monitor._hidden_scan_mode = True
-        monitor.handle_input(ord("\t"))
-        assert monitor._detail_focus is False
-
-    def test_escape_closes(self, monitor):
-        monitor._detail_focus = True
-        monitor._hidden_scan_mode = True
-        monitor.handle_input(27)
-        assert monitor._hidden_scan_mode is False
-        assert monitor._detail_focus is False
-
-    def test_quit_from_hidden(self, monitor):
-        monitor._detail_focus = True
-        monitor._hidden_scan_mode = True
-        result = monitor.handle_input(ord("q"))
-        assert result is False
-
-
-
-# ── Deep Hidden Scan Worker ────────────────────────────────────────────
-
-
-class TestDeepHiddenScan:
-    def test_clean_system(self, monitor):
-        """On a clean system (ps matches libproc, no anomalies), expect 0 findings."""
-        ps_mock = MagicMock()
-        ps_mock.communicate.return_value = (b"  1\n  2\n  3\n", b"")
-
-        lsof_mock = MagicMock()
-        lsof_mock.communicate.return_value = (b"COMMAND  PID\nfoo  1\n", b"")
-
-        sysctl_mock = MagicMock()
-        sysctl_mock.communicate.return_value = (b"100", b"")
-
-        def fake_popen(cmd, **kwargs):
-            if cmd[0] == "ps":
-                return ps_mock
-            elif cmd[0] == "lsof":
-                return lsof_mock
-            elif cmd[0] == "sysctl":
-                return sysctl_mock
-            return MagicMock()
-
-        with patch("subprocess.Popen", side_effect=fake_popen), \
-             patch("procmon._list_all_pids", return_value=[1, 2, 3]), \
-             patch("os.getpid", return_value=999), \
-             patch("procmon._libproc") as mock_libproc, \
-             patch("procmon._get_proc_path", return_value="/usr/bin/test"), \
-             patch("os.path.exists", return_value=True), \
-             patch("procmon._find_hidden_kexts", return_value=[]), \
-             patch("procmon._list_system_extensions", return_value=[]):
-            mock_libproc.proc_pidinfo.return_value = 0  # no hidden PIDs in brute force
-            findings = monitor._deep_hidden_scan()
-
-        # Scan now covers processes + kernel modules; the summary text was
-        # updated accordingly.
-        assert any("0 finding" in f for f in findings)
-
-
 # ── Background Hidden Check in collect_data ────────────────────────────
 
 
@@ -790,16 +619,6 @@ class TestNetModeExclusivity:
             monitor._toggle_net_mode()
         assert monitor._inspect_mode is False
         assert monitor._net_mode is True
-
-    def test_net_closes_hidden(self, monitor):
-        monitor.rows = [make_proc(pid=100, command="/usr/bin/test")]
-        monitor.selected = 0
-        monitor._hidden_scan_mode = True
-        with patch.object(monitor, "_start_net_fetch"):
-            monitor._toggle_net_mode()
-        assert monitor._hidden_scan_mode is False
-        assert monitor._net_mode is True
-
 
 # ── _get_proc_env ──────────────────────────────────────────────────────
 
@@ -874,7 +693,6 @@ class TestSortDialog:
         monitor._detail_focus = False
         monitor._net_mode = False
         monitor._inspect_mode = False
-        monitor._hidden_scan_mode = False
         with patch("curses.color_pair", side_effect=lambda n: n << 8), \
              patch.object(monitor, "_put") as put:
             monitor._render_shortcut_bar(40, 200)
@@ -904,7 +722,6 @@ class TestForensicDialog:
         monitor._detail_focus = False
         monitor._net_mode = False
         monitor._inspect_mode = False
-        monitor._hidden_scan_mode = False
         with patch("curses.color_pair", side_effect=lambda n: n << 8), \
              patch.object(monitor, "_put") as put:
             monitor._render_shortcut_bar(40, 200)
@@ -1700,31 +1517,11 @@ class TestCollectChatContextFallback:
     """Cover the less-common `_collect_chat_context` branches that aren't
     exercised by the primary TestChatOverlay class."""
 
-    def test_hidden_scan_mode_but_no_lines_falls_back(self, monitor):
-        """Hidden scan mode with no results shouldn't crash; it just skips
-        to the next matching branch."""
-        monitor._hidden_scan_mode = True
-        monitor._hidden_scan_lines = []
-        monitor.rows = [make_proc(pid=1, command="/bin/test")]
-        monitor.selected = 0
-        label, _ = monitor._collect_chat_context()
-        # Since hidden scan has no lines, falls through to "process list"
-        # (selected-process context).
-        assert "PID 1" in label
-
     def test_keyscan_without_lines_falls_back(self, monitor):
         monitor._keyscan_mode = True
         monitor._keyscan_lines = []
         label, _ = monitor._collect_chat_context()
         assert label == "Process list"
-
-    def test_bulk_scan_in_progress_no_live_findings(self, monitor):
-        monitor._bulk_scan_mode = True
-        monitor._bulk_scan_lines = []
-        monitor._bulk_scan_progress = (0, 0)
-        monitor._bulk_scan_live = []
-        label, text = monitor._collect_chat_context()
-        assert "Bulk" in label
 
     def test_events_mode_empty(self, monitor):
         monitor._events_mode = True
@@ -1810,85 +1607,11 @@ class TestQueryTccDb:
         assert entries == []
 
 
-class TestBulkAndHiddenWorkerBodies:
-    """The worker thread bodies inside _start_bulk_scan and _start_hidden_scan
-    aren't exercised by the usual tests because we always mock them out.
-    Drive them inline to get coverage on the try/except scaffolding."""
-
-    def test_hidden_scan_worker_reports_error(self, monitor):
-        """Exceptions inside the hidden scan become a user-visible message
-        rather than silently dying."""
-        with patch.object(monitor, "_deep_hidden_scan",
-                          side_effect=RuntimeError("boom")):
-            captured = []
-
-            def immediate_thread(target=None, daemon=None, **kw):
-                captured.append(target)
-                t = MagicMock()
-                t.start = lambda: target()
-                return t
-
-            with patch("threading.Thread", side_effect=immediate_thread):
-                monitor._start_hidden_scan()
-        assert any("Scan error" in s for s in monitor._hidden_scan_pending)
-
-    def test_hidden_scan_worker_success_path(self, monitor):
-        with patch.object(monitor, "_deep_hidden_scan",
-                          return_value=["Deep scan complete"]):
-            def immediate_thread(target=None, daemon=None, **kw):
-                t = MagicMock()
-                t.start = lambda: target()
-                return t
-
-            with patch("threading.Thread", side_effect=immediate_thread):
-                monitor._start_hidden_scan()
-        assert monitor._hidden_scan_pending == ["Deep scan complete"]
-
-
-
-    def test_bulk_scan_worker_captures_exception(self, monitor):
-        monitor._all_procs = [{"pid": 1, "command": "/bin/x"}]
-        with patch.object(monitor, "_bulk_scan_run",
-                          side_effect=RuntimeError("fail")):
-            def immediate_thread(target=None, daemon=None, **kw):
-                t = MagicMock()
-                t.start = lambda: target()
-                return t
-
-            with patch("threading.Thread", side_effect=immediate_thread):
-                monitor._start_bulk_scan()
-        assert any("Bulk scan error" in s for s in monitor._bulk_scan_pending)
-
-    def test_bulk_scan_worker_cancel_short_circuit(self, monitor):
-        """If cancel flag is set when the scan returns, the report shows
-        'Scan cancelled' rather than a big empty final report."""
-        monitor._all_procs = [{"pid": 1, "command": "/bin/x"}]
-
-        def fake_run(procs, **kw):
-            monitor._bulk_scan_cancel = True
-            return []
-
-        with patch.object(monitor, "_bulk_scan_run", side_effect=fake_run):
-            def immediate_thread(target=None, daemon=None, **kw):
-                t = MagicMock()
-                t.start = lambda: target()
-                return t
-
-            with patch("threading.Thread", side_effect=immediate_thread):
-                monitor._start_bulk_scan()
-        assert monitor._bulk_scan_pending == ["Scan cancelled."]
-
-
 class TestSecureKeyboardEntryPid:
     """The holder-PID attribution path in _check_secure_keyboard_entry
     parses ioreg output. Exercise with several shapes."""
 
 
-
-
-
-class TestHeuristicAdhocSignature:
-    """The ad-hoc branch in _heuristic_scan_process flags MEDIUM."""
 
 
 
@@ -1924,13 +1647,6 @@ class TestShutdownFurther:
                           side_effect=RuntimeError("bad")):
             # Must not propagate
             monitor._shutdown()
-
-    def test_cancels_bulk_scan_even_if_events_raise(self, monitor):
-        monitor._bulk_scan_cancel = False
-        with patch.object(monitor, "_stop_events_stream",
-                          side_effect=RuntimeError("x")):
-            monitor._shutdown()
-        assert monitor._bulk_scan_cancel is True
 
 
 
@@ -2023,15 +1739,12 @@ class TestPhantomTreeParent:
 
 
 class TestShutdownCleanup:
-    def test_shutdown_stops_events_and_cancels_bulk(self, monitor):
+    def test_shutdown_stops_events(self, monitor):
         fake_proc = MagicMock()
         monitor._events_proc = fake_proc
-        monitor._bulk_scan_cancel = False
         with patch.object(monitor, "_stop_events_stream") as stop:
             monitor._shutdown()
         stop.assert_called_once()
-        # Bulk scan cancel flag was flipped
-        assert monitor._bulk_scan_cancel is True
         # Explicit kill on the event subprocess
         fake_proc.kill.assert_called_once()
 
@@ -2304,7 +2017,6 @@ class TestDetailFocusInspectShortcutBar:
     def test_inspect_mode_shortcuts(self, monitor):
         monitor._detail_focus = True
         monitor._inspect_mode = True
-        monitor._hidden_scan_mode = False
         monitor._net_mode = False
         with patch("curses.color_pair", side_effect=lambda n: n << 8), \
              patch.object(monitor, "_put") as put:
@@ -2313,20 +2025,6 @@ class TestDetailFocusInspectShortcutBar:
         assert "Scroll" in texts
         assert "Close" in texts
         assert "Procs" in texts
-
-
-class TestDetailFocusHiddenShortcutBar:
-    def test_hidden_mode_shortcuts(self, monitor):
-        monitor._detail_focus = True
-        monitor._inspect_mode = False
-        monitor._hidden_scan_mode = True
-        monitor._net_mode = False
-        with patch("curses.color_pair", side_effect=lambda n: n << 8), \
-             patch.object(monitor, "_put") as put:
-            monitor._render_shortcut_bar(40, 200)
-        texts = " ".join(str(c.args[2]) if len(c.args) > 2 else "" for c in put.call_args_list)
-        assert "Scroll" in texts
-        assert "Close" in texts
 
 
 class TestCollectDataHiddenCheckMocked:
@@ -2467,203 +2165,6 @@ class TestRenderInspectAndHiddenDetail:
         text = self._render(monitor)
         assert "No inspect data" in text
 
-    def test_hidden_with_lines(self, monitor):
-        monitor.rows = [make_proc(pid=100, command="/usr/bin/test")]
-        monitor._hidden_scan_mode = True
-        monitor._hidden_scan_lines = ["Deep scan complete: 0 finding(s)"]
-        text = self._render(monitor)
-        assert "Deep scan" in text or "Hidden Process Scan" in text
-
-    def test_hidden_loading(self, monitor):
-        monitor.rows = [make_proc(pid=100, command="/usr/bin/test")]
-        monitor._hidden_scan_mode = True
-        monitor._hidden_scan_lines = []
-        monitor._hidden_scan_loading = True
-        text = self._render(monitor)
-        assert "Running deep" in text or "scan" in text.lower()
-
-    def test_hidden_empty(self, monitor):
-        monitor.rows = [make_proc(pid=100, command="/usr/bin/test")]
-        monitor._hidden_scan_mode = True
-        monitor._hidden_scan_lines = []
-        monitor._hidden_scan_loading = False
-        text = self._render(monitor)
-        assert "No scan results" in text
-
-
-# ── Deep Hidden Scan: findings paths ───────────────────────────────────
-
-
-class TestDeepHiddenScanFindings:
-    """Exercise each finding branch of _deep_hidden_scan."""
-
-    def test_reports_ps_hidden(self, monitor):
-        ps_mock = MagicMock()
-        ps_mock.communicate.return_value = (b"  1\n  99\n", b"")
-        sysctl_mock = MagicMock()
-        sysctl_mock.communicate.return_value = (b"100", b"")
-        lsof_mock = MagicMock()
-        lsof_mock.communicate.return_value = (b"", b"")
-
-        def popen(cmd, **kw):
-            if cmd[0] == "ps":
-                return ps_mock
-            if cmd[0] == "sysctl":
-                return sysctl_mock
-            return lsof_mock
-
-        with patch("subprocess.Popen", side_effect=popen), \
-             patch("procmon._list_all_pids", return_value=[1]), \
-             patch("os.getpid", return_value=999), \
-             patch("procmon._libproc") as lp, \
-             patch("procmon._get_proc_path", return_value="/bin/present"), \
-             patch("os.path.exists", return_value=True):
-            lp.proc_pidinfo.return_value = 0
-            findings = monitor._deep_hidden_scan()
-        text = "\n".join(findings)
-        assert "ps vs libproc" in text
-        assert "99" in text
-
-    def test_reports_net_hidden(self, monitor):
-        ps_mock = MagicMock()
-        ps_mock.communicate.return_value = (b"  1\n", b"")
-        sysctl_mock = MagicMock()
-        sysctl_mock.communicate.return_value = (b"100", b"")
-        lsof_mock = MagicMock()
-        lsof_mock.communicate.return_value = (
-            b"COMMAND PID USER\nfoo 77 root\n", b"")
-
-        def popen(cmd, **kw):
-            if cmd[0] == "ps":
-                return ps_mock
-            if cmd[0] == "sysctl":
-                return sysctl_mock
-            return lsof_mock
-
-        with patch("subprocess.Popen", side_effect=popen), \
-             patch("procmon._list_all_pids", return_value=[1]), \
-             patch("os.getpid", return_value=999), \
-             patch("procmon._libproc") as lp, \
-             patch("procmon._get_proc_path", return_value="/bin/present"), \
-             patch("os.path.exists", return_value=True):
-            lp.proc_pidinfo.return_value = 0
-            findings = monitor._deep_hidden_scan()
-        text = "\n".join(findings)
-        assert "Network-visible" in text
-        assert "77" in text
-
-    def test_reports_brute_force_hidden(self, monitor):
-        """proc_pidinfo returns >0 for a PID not in libproc_pids → brute-force finding."""
-        ps_mock = MagicMock()
-        ps_mock.communicate.return_value = (b"", b"")
-        sysctl_mock = MagicMock()
-        sysctl_mock.communicate.return_value = (b"5", b"")
-        lsof_mock = MagicMock()
-        lsof_mock.communicate.return_value = (b"", b"")
-
-        def popen(cmd, **kw):
-            if cmd[0] == "ps":
-                return ps_mock
-            if cmd[0] == "sysctl":
-                return sysctl_mock
-            return lsof_mock
-
-        with patch("subprocess.Popen", side_effect=popen), \
-             patch("procmon._list_all_pids", return_value=[]), \
-             patch("os.getpid", return_value=999), \
-             patch("procmon._libproc") as lp, \
-             patch("procmon._get_proc_path", return_value=None), \
-             patch("os.path.exists", return_value=True):
-            lp.proc_pidinfo.return_value = 1  # always hidden
-            findings = monitor._deep_hidden_scan()
-        text = "\n".join(findings)
-        assert "brute-force" in text
-
-    def test_reports_missing_binary(self, monitor):
-        ps_mock = MagicMock()
-        ps_mock.communicate.return_value = (b"", b"")
-        sysctl_mock = MagicMock()
-        sysctl_mock.communicate.return_value = (b"0", b"")
-        lsof_mock = MagicMock()
-        lsof_mock.communicate.return_value = (b"", b"")
-
-        def popen(cmd, **kw):
-            if cmd[0] == "ps":
-                return ps_mock
-            if cmd[0] == "sysctl":
-                return sysctl_mock
-            return lsof_mock
-
-        with patch("subprocess.Popen", side_effect=popen), \
-             patch("procmon._list_all_pids", return_value=[42]), \
-             patch("os.getpid", return_value=999), \
-             patch("procmon._libproc") as lp, \
-             patch("procmon._get_proc_path", return_value="/bin/vanished"), \
-             patch("os.path.exists", return_value=False):
-            lp.proc_pidinfo.return_value = 0
-            findings = monitor._deep_hidden_scan()
-        text = "\n".join(findings)
-        assert "binary missing" in text
-
-    def test_reports_orphaned_ppid(self, monitor):
-        ps_mock = MagicMock()
-        ps_mock.communicate.return_value = (b"", b"")
-        sysctl_mock = MagicMock()
-        sysctl_mock.communicate.return_value = (b"0", b"")
-        lsof_mock = MagicMock()
-        lsof_mock.communicate.return_value = (b"", b"")
-
-        def popen(cmd, **kw):
-            if cmd[0] == "ps":
-                return ps_mock
-            if cmd[0] == "sysctl":
-                return sysctl_mock
-            return lsof_mock
-
-        def fake_pidinfo(pid, flavor, arg, buf, size):
-            # Set ppid=99 on the local bsdinfo struct
-            bsdinfo = ctypes.cast(buf, ctypes.POINTER(procmon.proc_bsdinfo)).contents
-            bsdinfo.pbi_ppid = 99
-            return 1
-
-        import ctypes
-        with patch("subprocess.Popen", side_effect=popen), \
-             patch("procmon._list_all_pids", return_value=[5]), \
-             patch("os.getpid", return_value=999), \
-             patch("procmon._libproc") as lp, \
-             patch("procmon._get_proc_path", return_value="/bin/present"), \
-             patch("os.path.exists", return_value=True):
-            lp.proc_pidinfo.side_effect = fake_pidinfo
-            findings = monitor._deep_hidden_scan()
-        text = "\n".join(findings)
-        assert "Orphaned PPID" in text
-
-    def test_sysctl_failure_falls_back_to_default(self, monitor):
-        """sysctl failing → max_pid_val stays at default 99999."""
-        ps_mock = MagicMock()
-        ps_mock.communicate.return_value = (b"", b"")
-        lsof_mock = MagicMock()
-        lsof_mock.communicate.return_value = (b"", b"")
-
-        def popen(cmd, **kw):
-            if cmd[0] == "ps":
-                return ps_mock
-            if cmd[0] == "sysctl":
-                raise OSError("no sysctl")
-            return lsof_mock
-
-        with patch("subprocess.Popen", side_effect=popen), \
-             patch("procmon._list_all_pids", return_value=[1, 2, 3]), \
-             patch("os.getpid", return_value=999), \
-             patch("procmon._libproc") as lp, \
-             patch("procmon._get_proc_path", return_value="/bin/present"), \
-             patch("os.path.exists", return_value=True):
-            lp.proc_pidinfo.return_value = 0
-            findings = monitor._deep_hidden_scan()
-        # Should complete without raising even though sysctl failed
-        assert findings[0].startswith("Deep scan complete")
-
-
 # ── Artifact Collection Edge Cases ─────────────────────────────────────
 
 
@@ -2721,17 +2222,6 @@ class TestInspectFetchGuard:
         monitor._inspect_loading = False
         with patch("threading.Thread") as new_thread:
             monitor._start_inspect_fetch(1, "/bin/test")
-        new_thread.assert_not_called()
-
-
-class TestHiddenScanFetchGuard:
-    def test_start_hidden_scan_returns_if_worker_alive(self, monitor):
-        mock_thread = MagicMock()
-        mock_thread.is_alive.return_value = True
-        monitor._hidden_scan_worker = mock_thread
-        monitor._hidden_scan_loading = False
-        with patch("threading.Thread") as new_thread:
-            monitor._start_hidden_scan()
         new_thread.assert_not_called()
 
 
@@ -2902,7 +2392,6 @@ class TestRunLoopPolling:
         """The run loop calls _poll_inspect_result when _inspect_pending is set."""
         monitor._inspect_pending = ("complete", ["line"])
         monitor._net_pending = None
-        monitor._hidden_scan_pending = None
         monitor._inspect_mode = True
         monitor._inspect_loading = True
         with patch.object(monitor, "_poll_inspect_result",
@@ -2912,14 +2401,6 @@ class TestRunLoopPolling:
                 monitor._poll_inspect_result()
         poll.assert_called_once()
         assert monitor._inspect_lines == ["line"]
-
-    def test_polls_hidden_pending(self, monitor):
-        monitor._hidden_scan_pending = ["finding"]
-        monitor._hidden_scan_mode = True
-        monitor._hidden_scan_loading = True
-        if monitor._hidden_scan_pending is not None:
-            monitor._poll_hidden_scan_result()
-        assert monitor._hidden_scan_lines == ["finding"]
 
 
 # ── _render_preflight_report smoke test ───────────────────────────────
@@ -3005,376 +2486,6 @@ class TestGetProcEnvParsing:
         with patch.object(procmon._libc, "sysctl", side_effect=fake_sysctl):
             env = procmon._get_proc_env(1)
         assert env == {}
-
-
-# ── Bulk Security Scan ─────────────────────────────────────────────────
-
-
-
-
-class TestBulkScanRun:
-    def test_runs_across_procs_and_updates_progress(self, monitor):
-        procs = [{"pid": i, "command": f"/bin/p{i}"} for i in range(10)]
-        with patch.object(monitor, "_heuristic_scan_process",
-                          return_value=("LOW", [])):
-            findings = monitor._bulk_scan_run(procs, max_workers=4, llm_confirm=False)
-        assert findings == []
-        # Progress should be at (10, 10)
-        assert monitor._bulk_scan_progress == (10, 10)
-
-    def test_collects_non_low_findings(self, monitor):
-        procs = [{"pid": i, "command": f"/bin/p{i}"} for i in range(5)]
-
-        def fake_scan(proc):
-            if proc["pid"] == 1:
-                return ("CRITICAL", ["missing"])
-            if proc["pid"] == 2:
-                return ("HIGH", ["unsigned"])
-            return ("LOW", [])
-
-        with patch.object(monitor, "_heuristic_scan_process",
-                          side_effect=fake_scan):
-            findings = monitor._bulk_scan_run(procs, max_workers=2, llm_confirm=False)
-        assert len(findings) == 2
-        risks = [f[0] for f in findings]
-        assert "CRITICAL" in risks
-        assert "HIGH" in risks
-
-    def test_exception_in_scan_captured_as_error(self, monitor):
-        procs = [{"pid": 1, "command": "/bin/x"}]
-        with patch.object(monitor, "_heuristic_scan_process",
-                          side_effect=RuntimeError("boom")):
-            findings = monitor._bulk_scan_run(procs, max_workers=1, llm_confirm=False)
-        assert len(findings) == 1
-        assert findings[0][0] == "ERROR"
-
-    def test_cancel_stops_scanning(self, monitor):
-        procs = [{"pid": i, "command": f"/bin/p{i}"} for i in range(20)]
-        monitor._bulk_scan_cancel = True
-        with patch.object(monitor, "_heuristic_scan_process",
-                          return_value=("LOW", [])) as scan:
-            findings = monitor._bulk_scan_run(procs, max_workers=4, llm_confirm=False)
-        assert findings == []
-        # Cancel happens at the start of each _scan, so _heuristic_scan_process
-        # shouldn't be called
-        scan.assert_not_called()
-
-
-class TestBulkScanLlmConfirm:
-    """LLM analysis runs on EVERY process, not just heuristic flags."""
-
-    def test_runs_llm_on_every_process_not_just_flagged(self, monitor):
-        """Every process must go through the 3 LLMs + synthesis, regardless
-        of what the heuristic pre-check said."""
-        procs = [{"pid": i, "command": f"/bin/p{i}"} for i in range(3)]
-
-        def fake_scan(proc):
-            # All heuristics return LOW — LLM pass must still run
-            return ("LOW", [])
-
-        with patch.object(monitor, "_heuristic_scan_process", side_effect=fake_scan), \
-             patch("procmon._get_proc_path", return_value="/bin/test"), \
-             patch.object(monitor, "_collect_inspect_artifacts",
-                          return_value={"pid": 0, "exe_path": "/bin/p0"}), \
-             patch.object(monitor, "_run_llms_parallel",
-                          return_value={"claude": "r", "codex": "r", "gemini": "r"}), \
-             patch.object(monitor, "_synthesize_analyses",
-                          return_value=("claude", "CONSENSUS_RISK: LOW")) as synth:
-            findings = monitor._bulk_scan_run(procs, max_workers=2, llm_confirm=True)
-        # ALL 3 processes should have been sent to synthesis
-        assert synth.call_count == 3
-
-    def test_llm_downgrade_respected(self, monitor):
-        """When LLM consensus says LOW for a heuristic HIGH, final risk is LOW."""
-        procs = [{"pid": 1, "command": "/bin/x"}]
-        with patch.object(monitor, "_heuristic_scan_process",
-                          return_value=("HIGH", ["unsigned"])), \
-             patch("procmon._get_proc_path", return_value="/bin/test"), \
-             patch.object(monitor, "_collect_inspect_artifacts",
-                          return_value={"pid": 1, "exe_path": "/bin/x"}), \
-             patch.object(monitor, "_run_llms_parallel",
-                          return_value={"claude": "r", "codex": "r", "gemini": "r"}), \
-             patch.object(monitor, "_synthesize_analyses",
-                          return_value=("claude", "CONSENSUS_RISK: LOW\nbenign")):
-            findings = monitor._bulk_scan_run(procs, max_workers=1, llm_confirm=True)
-        # Heuristic said HIGH, LLM said LOW → final risk is LOW
-        # But reasons are still recorded, so finding is kept with LOW risk
-        assert len(findings) == 1
-        assert findings[0][0] == "LOW"
-
-    def test_kernel_thread_skips_llm(self, monitor):
-        """Process with no exe path (e.g. kernel thread) uses heuristic only."""
-        procs = [{"pid": 1, "command": "kernel_task"}]
-        with patch.object(monitor, "_heuristic_scan_process",
-                          return_value=("LOW", [])), \
-             patch("procmon._get_proc_path", return_value=None), \
-             patch.object(monitor, "_run_llms_parallel") as llms:
-            findings = monitor._bulk_scan_run(procs, max_workers=1, llm_confirm=True)
-        llms.assert_not_called()
-
-    def test_llm_error_preserves_heuristic_risk(self, monitor):
-        """If LLM pipeline raises, the heuristic verdict is kept and the
-        error is embedded in the report."""
-        procs = [{"pid": 1, "command": "/bin/x"}]
-        with patch.object(monitor, "_heuristic_scan_process",
-                          return_value=("CRITICAL", ["missing"])), \
-             patch("procmon._get_proc_path", return_value="/bin/x"), \
-             patch.object(monitor, "_collect_inspect_artifacts",
-                          side_effect=RuntimeError("artifact fail")):
-            findings = monitor._bulk_scan_run(procs, max_workers=1,
-                                               llm_confirm=True)
-        assert findings[0][0] == "CRITICAL"  # heuristic preserved
-        assert "LLM analysis error" in findings[0][4]
-
-    def test_progress_ticks_once_per_process(self, monitor):
-        """Progress total equals number of processes; each process ticks once
-        regardless of whether LLM ran."""
-        procs = [{"pid": i, "command": f"/bin/p{i}"} for i in range(5)]
-        with patch.object(monitor, "_heuristic_scan_process",
-                          return_value=("LOW", [])), \
-             patch("procmon._get_proc_path", return_value="/bin/x"), \
-             patch.object(monitor, "_collect_inspect_artifacts",
-                          return_value={"pid": 0, "exe_path": "/bin/x"}), \
-             patch.object(monitor, "_run_llms_parallel",
-                          return_value={"claude": "r", "codex": "r", "gemini": "r"}), \
-             patch.object(monitor, "_synthesize_analyses",
-                          return_value=("claude", "CONSENSUS_RISK: LOW")):
-            monitor._bulk_scan_run(procs, max_workers=2, llm_confirm=True)
-        assert monitor._bulk_scan_progress == (5, 5)
-
-
-class TestFormatBulkReport:
-    def test_sorted_by_severity(self, monitor):
-        findings = [
-            ("HIGH", 2, "/bin/high", ["r"], None),
-            ("CRITICAL", 1, "/bin/crit", ["r"], None),
-            ("MEDIUM", 3, "/bin/med", ["r"], None),
-        ]
-        lines = monitor._format_bulk_report(findings, total_scanned=100)
-        text = "\n".join(lines)
-        crit_pos = text.find("[CRITICAL]")
-        high_pos = text.find("[HIGH]")
-        med_pos = text.find("[MEDIUM]")
-        assert crit_pos < high_pos < med_pos
-
-    def test_no_findings_shows_clean_message(self, monitor):
-        lines = monitor._format_bulk_report([], total_scanned=250)
-        text = "\n".join(lines)
-        assert "250" in text
-        assert "No suspicious" in text
-
-    def test_counts_shown_in_header(self, monitor):
-        findings = [
-            ("CRITICAL", 1, "/bin/c1", ["r"], None),
-            ("CRITICAL", 2, "/bin/c2", ["r"], None),
-            ("HIGH", 3, "/bin/h1", ["r"], None),
-        ]
-        lines = monitor._format_bulk_report(findings, total_scanned=50)
-        header = lines[1]
-        assert "CRITICAL: 2" in header
-        assert "HIGH: 1" in header
-
-    def test_llm_report_included(self, monitor):
-        findings = [
-            ("CRITICAL", 1, "/bin/c", ["missing"],
-             "(synthesized by claude)\nCONSENSUS_RISK: CRITICAL\nAGREEMENT: unanimous"),
-        ]
-        lines = monitor._format_bulk_report(findings, total_scanned=1)
-        text = "\n".join(lines)
-        assert "LLM consensus" in text
-        assert "CONSENSUS_RISK: CRITICAL" in text
-
-    def test_legacy_4tuple_still_works(self, monitor):
-        """Backward compat: format accepts 4-tuples without llm_report."""
-        findings = [("HIGH", 1, "/bin/x", ["r"])]
-        lines = monitor._format_bulk_report(findings, total_scanned=1)
-        text = "\n".join(lines)
-        assert "HIGH" in text
-        assert "PID 1" in text
-
-
-class TestBulkScanToggle:
-    def test_toggle_on_launches_worker(self, monitor):
-        monitor._all_procs = [{"pid": 1, "command": "/bin/x"}]
-        with patch.object(monitor, "_start_bulk_scan") as start:
-            monitor._toggle_bulk_scan_mode()
-        assert monitor._bulk_scan_mode is True
-        assert monitor._detail_focus is True
-        start.assert_called_once()
-
-    def test_toggle_off_cancels(self, monitor):
-        monitor._bulk_scan_mode = True
-        monitor._detail_focus = True
-        monitor._toggle_bulk_scan_mode()
-        assert monitor._bulk_scan_cancel is True
-        assert monitor._bulk_scan_mode is False
-        assert monitor._detail_focus is False
-
-    def test_toggle_closes_other_modes(self, monitor):
-        monitor._inspect_mode = True
-        monitor._hidden_scan_mode = True
-        monitor._net_mode = True
-        monitor._all_procs = []
-        with patch.object(monitor, "_start_bulk_scan"):
-            monitor._toggle_bulk_scan_mode()
-        assert monitor._inspect_mode is False
-        assert monitor._hidden_scan_mode is False
-        assert monitor._net_mode is False
-
-    def test_other_modes_close_bulk(self, monitor):
-        monitor.rows = [make_proc(pid=100, command="/usr/bin/test")]
-        monitor._bulk_scan_mode = True
-        with patch.object(monitor, "_start_inspect_fetch"):
-            monitor._toggle_inspect_mode()
-        assert monitor._bulk_scan_mode is False
-
-
-class TestBulkScanPoll:
-    def test_poll_applies_pending(self, monitor):
-        monitor._bulk_scan_mode = True
-        monitor._bulk_scan_loading = True
-        monitor._bulk_scan_pending = ["line 1", "line 2"]
-        result = monitor._poll_bulk_scan_result()
-        assert result is True
-        assert monitor._bulk_scan_lines == ["line 1", "line 2"]
-        assert monitor._bulk_scan_loading is False
-
-    def test_poll_clears_when_mode_closed(self, monitor):
-        monitor._bulk_scan_mode = False
-        monitor._bulk_scan_pending = ["data"]
-        result = monitor._poll_bulk_scan_result()
-        assert result is False
-        assert monitor._bulk_scan_pending is None
-
-    def test_poll_nothing_pending(self, monitor):
-        monitor._bulk_scan_pending = None
-        assert monitor._poll_bulk_scan_result() is False
-
-
-class TestBulkScanStart:
-    def test_start_guarded_if_worker_alive(self, monitor):
-        mock_thread = MagicMock()
-        mock_thread.is_alive.return_value = True
-        monitor._bulk_scan_worker = mock_thread
-        with patch("threading.Thread") as new_thread:
-            monitor._start_bulk_scan()
-        new_thread.assert_not_called()
-
-    def test_start_launches_thread(self, monitor):
-        monitor._all_procs = [{"pid": 1, "command": "/bin/x"}]
-        monitor._bulk_scan_worker = None
-        fake_thread = MagicMock()
-        with patch("threading.Thread", return_value=fake_thread):
-            monitor._start_bulk_scan()
-        fake_thread.start.assert_called_once()
-
-
-class TestBulkScanInputHandling:
-    def test_scroll_down(self, monitor):
-        monitor._detail_focus = True
-        monitor._bulk_scan_mode = True
-        monitor._bulk_scan_scroll = 0
-        monitor.handle_input(curses.KEY_DOWN)
-        assert monitor._bulk_scan_scroll == 1
-
-    def test_scroll_up_clamps(self, monitor):
-        monitor._detail_focus = True
-        monitor._bulk_scan_mode = True
-        monitor._bulk_scan_scroll = 0
-        monitor.handle_input(curses.KEY_UP)
-        assert monitor._bulk_scan_scroll == 0
-
-    def test_page_down(self, monitor):
-        monitor._detail_focus = True
-        monitor._bulk_scan_mode = True
-        monitor._bulk_scan_scroll = 0
-        monitor.handle_input(curses.KEY_NPAGE)
-        assert monitor._bulk_scan_scroll > 0
-
-    def test_F_closes(self, monitor):
-        monitor._detail_focus = True
-        monitor._bulk_scan_mode = True
-        with patch.object(monitor, "_toggle_bulk_scan_mode") as tog:
-            monitor.handle_input(ord("F"))
-        tog.assert_called_once()
-
-    def test_escape_cancels(self, monitor):
-        monitor._detail_focus = True
-        monitor._bulk_scan_mode = True
-        monitor.handle_input(27)
-        assert monitor._bulk_scan_cancel is True
-        assert monitor._bulk_scan_mode is False
-
-    def test_tab_unfocuses(self, monitor):
-        monitor._detail_focus = True
-        monitor._bulk_scan_mode = True
-        monitor.handle_input(ord("\t"))
-        assert monitor._detail_focus is False
-
-    def test_q_quits(self, monitor):
-        monitor._detail_focus = True
-        monitor._bulk_scan_mode = True
-        result = monitor.handle_input(ord("q"))
-        assert result is False
-
-
-class TestBulkScanRender:
-    def _render(self, monitor):
-        monitor.stdscr.getmaxyx.return_value = (40, 160)
-        monitor.rows = [make_proc(pid=1, command="/bin/test")]
-        with patch("curses.color_pair", side_effect=lambda n: n << 8):
-            monitor.render()
-        return " ".join(str(c) for c in monitor.stdscr.addnstr.call_args_list)
-
-    def test_progress_bar_shown_during_scan(self, monitor):
-        monitor._bulk_scan_mode = True
-        monitor._bulk_scan_loading = True
-        monitor._bulk_scan_progress = (25, 100)
-        text = self._render(monitor)
-        assert "25/100" in text
-        assert "25%" in text
-        # Progress bar uses block glyphs
-        assert "\u2588" in text or "\u2591" in text
-
-    def test_starting_when_total_zero(self, monitor):
-        monitor._bulk_scan_mode = True
-        monitor._bulk_scan_loading = True
-        monitor._bulk_scan_progress = (0, 0)
-        text = self._render(monitor)
-        assert "Starting" in text
-
-    def test_results_shown_after_scan(self, monitor):
-        monitor._bulk_scan_mode = True
-        monitor._bulk_scan_loading = False
-        monitor._bulk_scan_lines = ["Bulk security scan — 5 process(es) scanned"]
-        text = self._render(monitor)
-        assert "Bulk security scan" in text or "Bulk Security Scan" in text
-
-    def test_live_findings_stream_in_view(self, monitor):
-        """While the scan is running, flagged processes appear under the
-        progress bar instead of waiting for the whole scan to finish."""
-        monitor._bulk_scan_mode = True
-        monitor._bulk_scan_loading = True
-        monitor._bulk_scan_progress = (10, 100)
-        monitor._bulk_scan_current = "PID 500: /bin/x"
-        monitor._bulk_scan_live = [
-            ("CRITICAL", 42, "/bin/sus", ["missing"], None),
-            ("HIGH", 77, "/tmp/dropper", ["/tmp"], None),
-        ]
-        text = self._render(monitor)
-        assert "Findings so far" in text
-        assert "[CRITICAL]" in text
-        assert "PID 42" in text
-        assert "PID 77" in text
-        assert "Last completed" in text
-
-    def test_live_view_shows_no_findings_yet(self, monitor):
-        monitor._bulk_scan_mode = True
-        monitor._bulk_scan_loading = True
-        monitor._bulk_scan_progress = (3, 100)
-        monitor._bulk_scan_live = []
-        text = self._render(monitor)
-        assert "no flagged processes yet" in text
 
 
 # ── Security helper: _codesign_structured ──────────────────────────────
@@ -3715,14 +2826,10 @@ class TestEventsToggle:
 
     def test_toggle_closes_other_modes(self, monitor):
         monitor._inspect_mode = True
-        monitor._hidden_scan_mode = True
-        monitor._bulk_scan_mode = True
         monitor._net_mode = True
         with patch.object(monitor, "_start_events_stream"):
             monitor._toggle_events_mode()
         assert monitor._inspect_mode is False
-        assert monitor._hidden_scan_mode is False
-        assert monitor._bulk_scan_mode is False
         assert monitor._net_mode is False
 
 

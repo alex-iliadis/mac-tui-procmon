@@ -169,27 +169,6 @@ class TestLlmSummaryInfrastructure:
 
 
 
-# ── 4. Hidden-scan summary trigger ───────────────────────────────────────
-
-
-class TestHiddenScanSummaryTrigger:
-    def test_poll_hidden_starts_summary_with_pseudo_findings(self, monitor):
-        monitor._hidden_scan_mode = True
-        monitor._hidden_scan_pending = [
-            "── PID brute-force ──",
-            "  [!] PID 999: /tmp/evil",
-            "",
-            "  Apple kext not in /Library/Extensions (ignored)",
-        ]
-        with patch.object(monitor, "_start_llm_summary") as start:
-            monitor._poll_hidden_scan_result()
-        start.assert_called_once()
-        scope, title, findings = start.call_args[0]
-        assert scope == "hidden"
-        # Non-blank lines are pseudo-findings; severity HIGH for [!] lines
-        assert any(f["severity"] == "HIGH" for f in findings)
-
-
 # ── 5. Inspect summary trigger ───────────────────────────────────────────
 
 

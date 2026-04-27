@@ -7,9 +7,9 @@ Each test follows the same shape:
     2. Press a single key (or sequence) via handle_input.
     3. Assert observable state change.
 
-Modes covered: main list, inspect, hidden_scan, keyscan, audit,
-bulk_scan, events, traffic, plus main-mode triage / secauditor-bridge
-hotkeys and the Escape-closes-special-mode chain.
+Modes covered: main list, inspect, keyscan, audit, events, traffic,
+plus main-mode triage / secauditor-bridge hotkeys and the
+Escape-closes-special-mode chain.
 """
 import curses
 import os
@@ -28,35 +28,6 @@ def _mock_curses():
     with patch("curses.color_pair", side_effect=lambda n: n), \
          patch("curses.curs_set", return_value=None):
         yield
-
-
-# ── Hidden-scan mode: paging keys ────────────────────────────────────────
-
-
-class TestHiddenScanPaging:
-    def _enter(self, monitor):
-        monitor._hidden_scan_mode = True
-        monitor._detail_focus = True
-        monitor._hidden_scan_scroll = 0
-        monitor._hidden_scan_lines = ["l%d" % i for i in range(50)]
-        monitor.stdscr.getmaxyx.return_value = (30, 120)
-
-    def test_page_down_jumps_scroll(self, monitor):
-        self._enter(monitor)
-        monitor.handle_input(curses.KEY_NPAGE)
-        assert monitor._hidden_scan_scroll == monitor._page_size()
-
-    def test_page_up_clamps_to_zero(self, monitor):
-        self._enter(monitor)
-        monitor._hidden_scan_scroll = 5
-        monitor.handle_input(curses.KEY_PPAGE)
-        assert monitor._hidden_scan_scroll == 0
-
-    def test_page_up_scrolls_back(self, monitor):
-        self._enter(monitor)
-        monitor._hidden_scan_scroll = 50
-        monitor.handle_input(curses.KEY_PPAGE)
-        assert monitor._hidden_scan_scroll == 50 - monitor._page_size()
 
 
 # ── Keyscan mode: scroll fallback + paging ───────────────────────────────
@@ -143,62 +114,6 @@ class TestAuditModeKeys:
         self._enter(monitor)
         result = monitor.handle_input(ord("q"))
         assert result is False
-
-
-# ── Bulk-scan mode: every key handler ────────────────────────────────────
-
-
-class TestBulkScanModeKeys:
-    def _enter(self, monitor):
-        monitor._bulk_scan_mode = True
-        monitor._detail_focus = True
-        monitor._bulk_scan_lines = ["l%d" % i for i in range(60)]
-        monitor._bulk_scan_scroll = 0
-        monitor.stdscr.getmaxyx.return_value = (30, 120)
-
-    def test_up_scrolls_up(self, monitor):
-        self._enter(monitor)
-        monitor._bulk_scan_scroll = 3
-        monitor.handle_input(curses.KEY_UP)
-        assert monitor._bulk_scan_scroll == 2
-
-    def test_down_scrolls_down(self, monitor):
-        self._enter(monitor)
-        monitor.handle_input(curses.KEY_DOWN)
-        assert monitor._bulk_scan_scroll == 1
-
-    def test_page_up_clamps(self, monitor):
-        self._enter(monitor)
-        monitor._bulk_scan_scroll = 3
-        monitor.handle_input(curses.KEY_PPAGE)
-        assert monitor._bulk_scan_scroll == 0
-
-    def test_page_down_jumps(self, monitor):
-        self._enter(monitor)
-        monitor.handle_input(curses.KEY_NPAGE)
-        assert monitor._bulk_scan_scroll == monitor._page_size()
-
-    def test_F_toggles_off(self, monitor):
-        self._enter(monitor)
-        with patch.object(monitor, "_toggle_bulk_scan_mode") as tg:
-            monitor.handle_input(ord("F"))
-            tg.assert_called_once()
-
-    def test_tab_releases_focus(self, monitor):
-        self._enter(monitor)
-        monitor.handle_input(ord("\t"))
-        assert monitor._detail_focus is False
-
-    def test_escape_cancels_and_closes(self, monitor):
-        self._enter(monitor)
-        monitor.handle_input(27)
-        assert monitor._bulk_scan_cancel is True
-        assert monitor._bulk_scan_mode is False
-        assert monitor._detail_focus is False
-
-    def test_q_quits(self, monitor):
-        self._enter(monitor)
-        assert monitor.handle_input(ord("q")) is False
 
 
 # ── Events mode: scroll/clear/escape (two-stage)/q ───────────────────────
@@ -403,8 +318,8 @@ class TestTabEnablesDetailFocus:
     """`Tab` only flips into detail focus if any of the special modes is on."""
 
     @pytest.mark.parametrize("flag", [
-        "_inspect_mode", "_hidden_scan_mode", "_net_mode",
-        "_bulk_scan_mode", "_events_mode",
+        "_inspect_mode", "_net_mode",
+        "_events_mode",
         "_audit_mode", "_traffic_mode",
     ])
     def test_tab_enters_focus_in_each_mode(self, monitor, flag):
@@ -426,22 +341,6 @@ class TestMainModeEscapeClosesSpecialModes:
         result = monitor.handle_input(27)
         assert result is True  # not a quit
         assert monitor._inspect_mode is False
-
-    def test_escape_closes_hidden_scan_mode(self, monitor):
-        monitor.rows = _rows()
-        monitor._hidden_scan_mode = True
-        result = monitor.handle_input(27)
-        assert result is True
-        assert monitor._hidden_scan_mode is False
-
-
-    def test_escape_closes_bulk_scan_mode(self, monitor):
-        monitor.rows = _rows()
-        monitor._bulk_scan_mode = True
-        result = monitor.handle_input(27)
-        assert result is True
-        assert monitor._bulk_scan_mode is False
-        assert monitor._bulk_scan_cancel is True
 
     def test_escape_closes_events_mode(self, monitor):
         monitor.rows = _rows()
@@ -526,34 +425,3 @@ class TestInspectModeDetailKeys:
         assert monitor.handle_input(ord("q")) is False
 
 
-# ── Hidden-scan mode all keys ────────────────────────────────────────────
-
-
-class TestHiddenScanAllKeys:
-    def _enter(self, monitor):
-        monitor._hidden_scan_mode = True
-        monitor._detail_focus = True
-        monitor._hidden_scan_lines = ["l%d" % i for i in range(60)]
-        monitor._hidden_scan_scroll = 0
-        monitor.stdscr.getmaxyx.return_value = (30, 120)
-
-    def test_H_toggles_off(self, monitor):
-        self._enter(monitor)
-        with patch.object(monitor, "_toggle_hidden_scan_mode") as t:
-            monitor.handle_input(ord("H"))
-            t.assert_called_once()
-
-    def test_tab_releases_focus(self, monitor):
-        self._enter(monitor)
-        monitor.handle_input(ord("\t"))
-        assert monitor._detail_focus is False
-
-    def test_escape_closes(self, monitor):
-        self._enter(monitor)
-        monitor.handle_input(27)
-        assert monitor._hidden_scan_mode is False
-        assert monitor._detail_focus is False
-
-    def test_q_quits(self, monitor):
-        self._enter(monitor)
-        assert monitor.handle_input(ord("q")) is False

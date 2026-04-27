@@ -93,34 +93,6 @@ class TestCollectChatContextExtras:
         assert "1234" in label
         assert "inspect report line" in text
 
-    def test_hidden_scan_context(self, monitor):
-        monitor._hidden_scan_mode = True
-        monitor._hidden_scan_lines = ["hidden-scan output"]
-        monitor.rows = []
-        label, text = monitor._collect_chat_context()
-        assert "Hidden" in label
-        assert "hidden-scan output" in text
-
-    def test_bulk_scan_progress_context(self, monitor):
-        monitor._bulk_scan_mode = True
-        monitor._bulk_scan_lines = []
-        monitor._bulk_scan_progress = (10, 50)
-        monitor._bulk_scan_live = [
-            ("CRITICAL", 1, "/bad", ["r1", "r2"], None),
-        ]
-        monitor._bulk_scan_live_lock = threading.Lock()
-        label, text = monitor._collect_chat_context()
-        assert "Bulk" in label
-        assert "10/50" in text
-
-    def test_bulk_scan_completed_context(self, monitor):
-        monitor._bulk_scan_mode = True
-        monitor._bulk_scan_lines = ["completed bulk report line"]
-        monitor._bulk_scan_live = []
-        monitor._bulk_scan_live_lock = threading.Lock()
-        label, text = monitor._collect_chat_context()
-        assert "completed" in text.lower()
-
     def test_events_mode_context(self, monitor):
         monitor._events_mode = True
         monitor._events_lock = threading.Lock()

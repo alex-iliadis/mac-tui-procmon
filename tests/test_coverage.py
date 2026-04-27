@@ -798,14 +798,12 @@ class TestToggleNetMode:
         monitor.rows = [make_proc(pid=1, command="/usr/bin/test")]
         monitor._net_mode = False
         monitor._inspect_mode = True  # should be closed by _toggle_net_mode
-        monitor._hidden_scan_mode = True  # should be closed by _toggle_net_mode
         with patch.object(monitor, "_start_net_fetch"):
             monitor._toggle_net_mode()
         assert monitor._net_mode is True
         assert monitor._detail_focus is True
         # Modal exclusivity
         assert monitor._inspect_mode is False
-        assert monitor._hidden_scan_mode is False
 
     def test_toggle_off(self, monitor):
         monitor._net_mode = True

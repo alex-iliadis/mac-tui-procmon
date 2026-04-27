@@ -84,30 +84,12 @@ def monitor():
     mon._inspect_pending = None
     mon._inspect_loading = False
     mon._inspect_phase = ""
-    # Hidden process detection
+    # Hidden process detection (passive header badge only)
     mon._hidden_pids = set()
     mon._hidden_alert_count = 0
-    mon._hidden_scan_mode = False
-    mon._hidden_scan_lines = []
-    mon._hidden_scan_scroll = 0
-    mon._hidden_scan_worker = None
-    mon._hidden_scan_pending = None
-    mon._hidden_scan_loading = False
     mon._last_hidden_check = 0.0
-    # Bulk scan
-    mon._bulk_scan_mode = False
-    mon._bulk_scan_lines = []
-    mon._bulk_scan_scroll = 0
-    mon._bulk_scan_worker = None
-    mon._bulk_scan_pending = None
-    mon._bulk_scan_loading = False
-    mon._bulk_scan_progress = (0, 0)
-    mon._bulk_scan_cancel = False
-    import threading as _threading
-    mon._bulk_scan_live = []
-    mon._bulk_scan_live_lock = _threading.Lock()
-    mon._bulk_scan_current = ""
     # Debug log
+    import threading as _threading
     import threading as _t
     mon._log_messages = []
     mon._log_lock = _t.Lock()
@@ -126,17 +108,17 @@ def monitor():
     mon._chat_context_label = ""
     mon._chat_context_text = ""
     # LLM executive-summary state (per-scope)
-    mon._llm_summary = {"audit": None, "hidden": None,
-                        "inspect": None, "events": None, "bulk": None}
+    mon._llm_summary = {"audit": None,
+                        "inspect": None, "events": None}
     mon._llm_summary_pending = {"audit": None,
-                                 "hidden": None, "inspect": None,
-                                 "events": None, "bulk": None}
+                                 "inspect": None,
+                                 "events": None}
     mon._llm_summary_loading = {"audit": False,
-                                 "hidden": False, "inspect": False,
-                                 "events": False, "bulk": False}
+                                 "inspect": False,
+                                 "events": False}
     mon._llm_summary_worker = {"audit": None,
-                                "hidden": None, "inspect": None,
-                                "events": None, "bulk": None}
+                                "inspect": None,
+                                "events": None}
     # Host security audits
     mon._audit_mode = False
     mon._audit_type = None

@@ -1056,31 +1056,6 @@ def _check_hidden_pids_quick(libproc_pids):
     return hidden
 
 
-def _check_hidden_pids_network():
-    """Get PIDs with network connections via lsof. Returns set of PIDs."""
-    try:
-        proc = subprocess.Popen(
-            ["lsof", "-i", "-n", "-P", "+c0"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        try:
-            stdout, _ = proc.communicate(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
-            return set()
-    except (FileNotFoundError, OSError):
-        return set()
-    net_pids = set()
-    for line in stdout.decode("utf-8", errors="replace").splitlines()[1:]:
-        parts = line.split()
-        if len(parts) >= 2:
-            try:
-                net_pids.add(int(parts[1]))
-            except ValueError:
-                pass
-    return net_pids
-
-
 # ── Kernel Module (kext) Enumeration ──────────────────────────────────────
 
 def _kextmanager_loaded_kexts():
@@ -2968,31 +2943,10 @@ class ProcMonUI:
         self._inspect_pending = None    # (status, lines) tuple from background
         self._inspect_loading = False
         self._inspect_phase = ""        # "collecting" | "analyzing" | ""
-        # Hidden process detection state
+        # Hidden process detection state (passive header badge only)
         self._hidden_pids = set()
         self._hidden_alert_count = 0
-        self._hidden_scan_mode = False
-        self._hidden_scan_lines = []
-        self._hidden_scan_scroll = 0
-        self._hidden_scan_worker = None
-        self._hidden_scan_pending = None
-        self._hidden_scan_loading = False
         self._last_hidden_check = 0.0
-        # Bulk security scan state
-        self._bulk_scan_mode = False
-        self._bulk_scan_lines = []
-        self._bulk_scan_scroll = 0
-        self._bulk_scan_worker = None
-        self._bulk_scan_pending = None
-        self._bulk_scan_loading = False
-        self._bulk_scan_progress = (0, 0)  # (completed, total)
-        self._bulk_scan_cancel = False
-        # Live findings accumulated during a bulk scan (thread-safe via
-        # _bulk_scan_live_lock). Rendered underneath the progress bar so the
-        # user has something to read while the scan runs.
-        self._bulk_scan_live = []
-        self._bulk_scan_live_lock = threading.Lock()
-        self._bulk_scan_current = ""  # short label of the process being worked on
         # Debug log — append-only ring buffer that every interesting
         # subprocess / verification / action writes into. Accessible via
         # the `L` key from any view so the user can see *exactly* what
@@ -3019,20 +2973,20 @@ class ProcMonUI:
         # slot is written by the background worker and consumed by the poll
         # helper; *_loading drives a "thinking…" indicator in the UI.
         self._llm_summary = {
-            "audit": None, "hidden": None,
-            "inspect": None, "events": None, "bulk": None,
+            "audit": None,
+            "inspect": None, "events": None,
         }
         self._llm_summary_pending = {
-            "audit": None, "hidden": None,
-            "inspect": None, "events": None, "bulk": None,
+            "audit": None,
+            "inspect": None, "events": None,
         }
         self._llm_summary_loading = {
-            "audit": False, "hidden": False,
-            "inspect": False, "events": False, "bulk": False,
+            "audit": False,
+            "inspect": False, "events": False,
         }
         self._llm_summary_worker = {
-            "audit": None, "hidden": None,
-            "inspect": None, "events": None, "bulk": None,
+            "audit": None,
+            "inspect": None, "events": None,
         }
         # Structured-findings panel (used by Deep Process Triage)
         self._audit_mode = False
@@ -3155,15 +3109,9 @@ class ProcMonUI:
         if self._audit_mode:
             return ("audit", self._audit_type or "unknown", title,
                     self._audit_loading, self._audit_findings_structured)
-        if self._hidden_scan_mode:
-            return ("forensic", "hidden", title,
-                    self._hidden_scan_loading, None)
         if self._inspect_mode:
             return ("forensic", "inspect", title,
                     self._inspect_loading, None)
-        if self._bulk_scan_mode:
-            return ("forensic", "bulk", title,
-                    self._bulk_scan_loading, None)
         if self._events_mode:
             return ("forensic", "events", title, False, None)
         if self._traffic_mode:
@@ -3217,12 +3165,8 @@ class ProcMonUI:
         """Return ('ready'|'loading', ready_bool) for the active detail pane."""
         if self._audit_mode:
             ready = bool(self._audit_lines) and not self._audit_loading
-        elif self._hidden_scan_mode:
-            ready = bool(self._hidden_scan_lines) and not self._hidden_scan_loading
         elif self._inspect_mode:
             ready = bool(self._inspect_lines) and not self._inspect_loading
-        elif self._bulk_scan_mode:
-            ready = bool(self._bulk_scan_lines) and not self._bulk_scan_loading
         elif self._events_mode:
             ready = True
         elif self._traffic_mode:
@@ -3384,10 +3328,6 @@ class ProcMonUI:
             self._toggle_inspect_mode()
         elif action == "triage":
             self._toggle_process_triage_mode()
-        elif action == "hidden":
-            self._toggle_hidden_scan_mode()
-        elif action == "bulk":
-            self._toggle_bulk_scan_mode()
         elif action == "events":
             self._toggle_events_mode()
         elif action == "traffic":
@@ -3735,68 +3675,6 @@ class ProcMonUI:
             detail_title = f"Inspect \u2014 {self._inspect_cmd} ({self._inspect_pid})"
             max_detail_h = max(8, (h - y) * 2 // 3)
             detail_h = min(len(detail_all_lines) + 2, max_detail_h)
-        elif self._hidden_scan_mode:
-            if self._hidden_scan_lines:
-                detail_all_lines = list(self._hidden_scan_lines)
-                summary = (self._llm_summary.get("hidden")
-                           or self._llm_summary_loading_banner("hidden"))
-                if summary:
-                    detail_all_lines = summary + detail_all_lines
-            elif self._hidden_scan_loading:
-                detail_all_lines = [" Running deep hidden process scan\u2026"]
-            else:
-                detail_all_lines = [" No scan results"]
-            detail_title = "Hidden Processes + Kernel Modules Scan"
-            max_detail_h = max(8, (h - y) * 2 // 3)
-            detail_h = min(len(detail_all_lines) + 2, max_detail_h)
-        elif self._bulk_scan_mode:
-            if self._bulk_scan_lines:
-                # Final report rendered after scan completion
-                detail_all_lines = list(self._bulk_scan_lines)
-            elif self._bulk_scan_loading:
-                done, total = self._bulk_scan_progress
-                if total > 0:
-                    pct = int(done * 100 / total)
-                    bar_w = 40
-                    filled = int(bar_w * done / total)
-                    bar = "\u2588" * filled + "\u2591" * (bar_w - filled)
-                    header = [
-                        f" Bulk security scan \u2014 {done}/{total} ({pct}%)",
-                        f" [{bar}]",
-                    ]
-                    if self._bulk_scan_current:
-                        header.append(f" Last completed: {self._bulk_scan_current}")
-                    header.append(" Press Esc or F to cancel.")
-                    header.append("")
-                    # Snapshot live findings so the user sees them streaming in
-                    with self._bulk_scan_live_lock:
-                        live_snapshot = list(self._bulk_scan_live)
-                    if live_snapshot:
-                        live_lines = [" Findings so far "
-                                      f"({len(live_snapshot)} flagged):"]
-                        # Sort worst-first so the CRITICAL items stay visible
-                        live_snapshot.sort(
-                            key=lambda f: (self._RISK_RANK.get(f[0], 99), f[1]))
-                        for risk, pid, cmd, reasons, _ in live_snapshot[:40]:
-                            path = _get_proc_path(pid) or (
-                                cmd[:60] if cmd else "(no command)")
-                            live_lines.append(f"  [{risk}] PID {pid}: {path}")
-                            for r in reasons[:2]:
-                                live_lines.append(f"      \u2022 {r}")
-                        if len(live_snapshot) > 40:
-                            live_lines.append(
-                                f"  \u2026 ({len(live_snapshot) - 40} more)")
-                    else:
-                        live_lines = [" (no flagged processes yet)"]
-                    detail_all_lines = header + live_lines
-                else:
-                    detail_all_lines = [" Starting bulk security scan\u2026"]
-            else:
-                detail_all_lines = [" No scan results"]
-            detail_title = "Bulk Security Scan"
-            # Use most of the remaining space so findings get room to breathe
-            max_detail_h = max(10, (h - y) * 3 // 4)
-            detail_h = min(len(detail_all_lines) + 2, max_detail_h)
         elif self._audit_mode:
             if self._audit_lines:
                 result = self._audit_action_result
@@ -4002,12 +3880,6 @@ class ProcMonUI:
         if self._inspect_mode:
             scroll = self._inspect_scroll
             sel_line = -1
-        elif self._hidden_scan_mode:
-            scroll = self._hidden_scan_scroll
-            sel_line = -1
-        elif self._bulk_scan_mode:
-            scroll = self._bulk_scan_scroll
-            sel_line = -1
         elif self._audit_mode:
             scroll = self._audit_scroll
             sel_line = -1
@@ -4052,12 +3924,6 @@ class ProcMonUI:
             title = self._chat_context_label
         elif self._inspect_mode:
             surface = "inspect_view"
-            title = detail_title
-        elif self._hidden_scan_mode:
-            surface = "hidden_view"
-            title = detail_title
-        elif self._bulk_scan_mode:
-            surface = "bulk_view"
             title = detail_title
         elif self._audit_mode:
             surface = "audit_view"
@@ -4342,25 +4208,6 @@ class ProcMonUI:
                     ("Esc", "Back"),
                     ("q", "Quit"),
                 ]
-            elif self._hidden_scan_mode:
-                shortcuts = [
-                    ("\u2191\u2193", "Scroll"),
-                    ("PgU/D", "Page"),
-                    ("?", "Ask"),
-                    ("H", "Close"),
-                    ("Tab", "Procs"),
-                    ("Esc", "Back"),
-                    ("q", "Quit"),
-                ]
-            elif self._bulk_scan_mode:
-                shortcuts = [
-                    ("\u2191\u2193", "Scroll"),
-                    ("PgU/D", "Page"),
-                    ("?", "Ask"),
-                    ("Esc", "Cancel/Close"),
-                    ("Tab", "Procs"),
-                    ("q", "Quit"),
-                ]
             elif self._audit_mode:
                 shortcuts = [
                     ("\u2191\u2193", "Select"),
@@ -4501,25 +4348,6 @@ class ProcMonUI:
                 elif key == ord("q"):
                     return False
                 return True
-            elif self._hidden_scan_mode:
-                if key == curses.KEY_UP:
-                    self._hidden_scan_scroll = max(0, self._hidden_scan_scroll - 1)
-                elif key == curses.KEY_DOWN:
-                    self._hidden_scan_scroll += 1
-                elif key == curses.KEY_PPAGE:
-                    self._hidden_scan_scroll = max(0, self._hidden_scan_scroll - self._page_size())
-                elif key == curses.KEY_NPAGE:
-                    self._hidden_scan_scroll += self._page_size()
-                elif key == ord("H"):
-                    self._toggle_hidden_scan_mode()
-                elif key == ord("\t"):
-                    self._detail_focus = False
-                elif key == 27:
-                    self._hidden_scan_mode = False
-                    self._detail_focus = False
-                elif key == ord("q"):
-                    return False
-                return True
             elif self._audit_mode:
                 if key == curses.KEY_UP:
                     if self._audit_findings_structured:
@@ -4543,26 +4371,6 @@ class ProcMonUI:
                     self._detail_focus = False
                 elif key == 27:
                     self._audit_mode = False
-                    self._detail_focus = False
-                elif key == ord("q"):
-                    return False
-                return True
-            elif self._bulk_scan_mode:
-                if key == curses.KEY_UP:
-                    self._bulk_scan_scroll = max(0, self._bulk_scan_scroll - 1)
-                elif key == curses.KEY_DOWN:
-                    self._bulk_scan_scroll += 1
-                elif key == curses.KEY_PPAGE:
-                    self._bulk_scan_scroll = max(0, self._bulk_scan_scroll - self._page_size())
-                elif key == curses.KEY_NPAGE:
-                    self._bulk_scan_scroll += self._page_size()
-                elif key == ord("F"):
-                    self._toggle_bulk_scan_mode()
-                elif key == ord("\t"):
-                    self._detail_focus = False
-                elif key == 27:
-                    self._bulk_scan_cancel = True
-                    self._bulk_scan_mode = False
                     self._detail_focus = False
                 elif key == ord("q"):
                     return False
@@ -4698,8 +4506,8 @@ class ProcMonUI:
         elif key == ord("T"):
             self._toggle_process_triage_mode()
         elif key == ord("\t"):
-            if (self._inspect_mode or self._hidden_scan_mode or self._net_mode
-                    or self._bulk_scan_mode or self._events_mode
+            if (self._inspect_mode or self._net_mode
+                    or self._events_mode
                     or self._audit_mode or self._traffic_mode):
                 self._detail_focus = True
         elif key == ord("C"):  # Shift+C — alert config
@@ -4711,13 +4519,6 @@ class ProcMonUI:
         elif key == 27:  # Escape
             if self._inspect_mode:
                 self._inspect_mode = False
-                self._detail_focus = False
-            elif self._hidden_scan_mode:
-                self._hidden_scan_mode = False
-                self._detail_focus = False
-            elif self._bulk_scan_mode:
-                self._bulk_scan_cancel = True
-                self._bulk_scan_mode = False
                 self._detail_focus = False
             elif self._events_mode:
                 self._stop_events_stream()
@@ -4853,8 +4654,6 @@ class ProcMonUI:
         self._net_scroll = 0
         self._net_mode = True
         self._inspect_mode = False
-        self._hidden_scan_mode = False
-        self._bulk_scan_mode = False
         if getattr(self, "_events_mode", False):
             self._stop_events_stream()
             self._events_mode = False
@@ -4920,204 +4719,6 @@ class ProcMonUI:
         if self._net_selected >= len(self._net_entries):
             self._net_selected = max(0, len(self._net_entries) - 1)
         return True  # data changed, needs re-render
-
-    # ── Hidden Process Detection ──────────────────────────────────────────
-
-    def _deep_hidden_scan(self):
-        """Comprehensive hidden process detection. Runs in background thread."""
-        findings = []
-        libproc_pids = set(_list_all_pids())
-        own_pid = os.getpid()
-
-        # 1. ps cross-reference
-        ps_hidden = _check_hidden_pids_quick(list(libproc_pids))
-        if ps_hidden:
-            findings.append("\u2500\u2500 ps vs libproc discrepancies \u2500\u2500")
-            for pid in sorted(ps_hidden):
-                findings.append(f"  [!] PID {pid}: visible to ps but NOT to proc_listallpids()")
-            findings.append("")
-
-        # 2. Network cross-reference
-        net_pids = _check_hidden_pids_network()
-        net_hidden = net_pids - libproc_pids
-        net_hidden.discard(0)
-        net_hidden.discard(own_pid)
-        if net_hidden:
-            findings.append("\u2500\u2500 Network-visible but libproc-invisible \u2500\u2500")
-            for pid in sorted(net_hidden):
-                findings.append(f"  [!] PID {pid}: has network connections but not in proc_listallpids()")
-            findings.append("")
-
-        # 3. PID brute-force: try proc_pidinfo on PIDs 1..max_pid
-        max_pid_val = 99999
-        try:
-            proc = subprocess.Popen(["sysctl", "-n", "kern.maxproc"],
-                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            stdout, _ = proc.communicate(timeout=3)
-            max_pid_val = min(int(stdout.strip()), 99999)
-        except Exception:
-            pass
-
-        brute_hidden = set()
-        local_bsdinfo = proc_bsdinfo()
-        for test_pid in range(1, max_pid_val + 1):
-            if test_pid == own_pid or test_pid in libproc_pids:
-                continue
-            ret = _libproc.proc_pidinfo(
-                test_pid, PROC_PIDTBSDINFO, 0,
-                ctypes.byref(local_bsdinfo), ctypes.sizeof(local_bsdinfo))
-            if ret > 0:
-                brute_hidden.add(test_pid)
-
-        if brute_hidden:
-            findings.append("\u2500\u2500 PID brute-force: respond to proc_pidinfo but not listed \u2500\u2500")
-            for pid in sorted(brute_hidden):
-                path = _get_proc_path(pid) or "[unknown]"
-                findings.append(f"  [!] PID {pid}: {path}")
-            findings.append("")
-
-        # 4. Verify binary paths exist
-        findings.append("\u2500\u2500 Binary path verification \u2500\u2500")
-        missing_count = 0
-        for pid in sorted(libproc_pids):
-            if pid <= 0 or pid == own_pid:
-                continue
-            path = _get_proc_path(pid)
-            if path and not os.path.exists(path):
-                findings.append(f"  [!] PID {pid}: binary missing at {path}")
-                missing_count += 1
-        if missing_count == 0:
-            findings.append("  All binary paths verified OK")
-        findings.append("")
-
-        # 5. Orphaned PPID check
-        findings.append("\u2500\u2500 Orphaned PPID check \u2500\u2500")
-        orphan_count = 0
-        local_info = proc_bsdinfo()
-        for pid in sorted(libproc_pids):
-            if pid <= 0 or pid == own_pid:
-                continue
-            ret = _libproc.proc_pidinfo(
-                pid, PROC_PIDTBSDINFO, 0,
-                ctypes.byref(local_info), ctypes.sizeof(local_info))
-            if ret > 0:
-                ppid = local_info.pbi_ppid
-                if ppid > 1 and ppid not in libproc_pids:
-                    path = _get_proc_path(pid) or "[unknown]"
-                    findings.append(f"  [!] PID {pid} ({path}): PPID {ppid} does not exist")
-                    orphan_count += 1
-        if orphan_count == 0:
-            findings.append("  No orphaned PPIDs found")
-        findings.append("")
-
-        # 6. Kernel-extension cross-reference (IOKit vs kmutil)
-        findings.append("\u2500\u2500 Kernel module cross-reference \u2500\u2500")
-        kext_findings = _find_hidden_kexts()
-        if kext_findings:
-            for severity, msg in kext_findings:
-                findings.append(f"  [{severity}] {msg}")
-        else:
-            findings.append("  No kext inconsistencies detected")
-        findings.append("")
-
-        # 7. System extensions (user-space replacements for kexts)
-        findings.append("\u2500\u2500 System extensions \u2500\u2500")
-        sysexts = _list_system_extensions()
-        if sysexts:
-            for s in sysexts:
-                flag = "[!]" if s.get("state") and "waiting" in s["state"] else "   "
-                findings.append(
-                    f"  {flag} team={s['team_id']:<12} "
-                    f"bundle={s['bundle_id']} state={s['state']}")
-        else:
-            findings.append("  (none installed, or systemextensionsctl unavailable)")
-        findings.append("")
-
-        # 8. Live kernel hook detection limitation notice
-        # Per the synthesi research, live syscall/trap-table integrity checks
-        # are blocked by SIP/KTRR on modern macOS. Document it instead of
-        # pretending to check.
-        findings.append("\u2500\u2500 Live kernel-hook detection \u2500\u2500")
-        findings.append(
-            "  [skipped] /dev/kmem is gone; task_for_pid(kernel_task) needs")
-        findings.append(
-            "  a debug-signed entitlement. Use KDK+lldb on a captured")
-        findings.append("  kernelcore for offline syscall/trap-table analysis.")
-        findings.append("")
-
-        # Summary
-        total = (len(ps_hidden) + len(net_hidden) + len(brute_hidden)
-                 + missing_count + orphan_count + len(kext_findings))
-        findings.insert(0,
-            f"Deep scan complete: {total} finding(s) "
-            f"across processes + kernel modules")
-        findings.insert(1, "")
-        return findings
-
-    def _toggle_hidden_scan_mode(self):
-        """Toggle deep hidden process scan mode (H key)."""
-        if self._hidden_scan_mode:
-            self._hidden_scan_mode = False
-            self._detail_focus = False
-            return
-        self._hidden_scan_lines = []
-        self._hidden_scan_scroll = 0
-        self._hidden_scan_mode = True
-        self._llm_summary["hidden"] = None
-        self._llm_summary_pending["hidden"] = None
-        self._llm_summary_loading["hidden"] = False
-        self._inspect_mode = False
-        self._bulk_scan_mode = False
-        if getattr(self, "_events_mode", False):
-            self._stop_events_stream()
-            self._events_mode = False
-        self._net_mode = False
-        self._detail_focus = True
-        self._hidden_scan_loading = True
-        self._start_hidden_scan()
-
-    def _start_hidden_scan(self):
-        """Launch background thread for deep hidden process scan."""
-        if self._hidden_scan_worker and self._hidden_scan_worker.is_alive():
-            return
-        self._hidden_scan_loading = True
-        self._hidden_scan_pending = None
-
-        def _worker():
-            try:
-                result = self._deep_hidden_scan()
-            except Exception as e:
-                result = [f"[Scan error: {e}]"]
-            self._hidden_scan_pending = result
-
-        self._hidden_scan_worker = threading.Thread(target=_worker, daemon=True)
-        self._hidden_scan_worker.start()
-
-    def _poll_hidden_scan_result(self):
-        """Check if background hidden scan completed."""
-        if self._hidden_scan_pending is None:
-            return False
-        if not self._hidden_scan_mode:
-            self._hidden_scan_pending = None
-            self._hidden_scan_loading = False
-            return False
-        self._hidden_scan_lines = self._hidden_scan_pending
-        self._hidden_scan_pending = None
-        self._hidden_scan_loading = False
-        # Kick off the AI summary. Hidden-scan output is raw text, so we wrap
-        # each non-blank line as a pseudo-finding for the summarizer.
-        pseudo = []
-        for ln in self._hidden_scan_lines:
-            s = ln.strip()
-            if not s or s.startswith(("\u2500", "\u2501", "==", "--")):
-                continue
-            sev = ("HIGH" if ("[!]" in s or "brute-force" in s
-                              or "not in proc_listallpids" in s)
-                   else "INFO")
-            pseudo.append({"severity": sev, "message": s[:200], "action": None})
-        self._start_llm_summary(
-            "hidden", "Hidden processes + kernel modules scan", pseudo)
-        return True
 
     # ── Shared report layout (audits + keyscan) ────────────────────────
 
@@ -5340,8 +4941,7 @@ class ProcMonUI:
         self._llm_summary_pending[scope] on completion. No-op if a worker
         is already in flight or claude is not available (best-effort).
 
-        `scope` is one of: "audit", "keyscan", "hidden", "inspect",
-        "events", "bulk".
+        `scope` is one of: "audit", "inspect", "events".
         """
         if (getattr(self, "_test_mode", False)
                 and os.environ.get("MAC_TUI_PROCMON_TEST_ALLOW_LLM", "").lower()
@@ -5461,8 +5061,6 @@ class ProcMonUI:
         self._llm_summary_loading["audit"] = False
         # Close mutually-exclusive modes
         self._inspect_mode = False
-        self._hidden_scan_mode = False
-        self._bulk_scan_mode = False
         self._net_mode = False
         if getattr(self, "_events_mode", False):
             self._stop_events_stream()
@@ -5772,330 +5370,6 @@ class ProcMonUI:
                     return False
         finally:
             self.stdscr.timeout(100)
-
-    # ── Bulk Security Scan (all processes) ──────────────────────────────
-
-    _RISK_RANK = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
-
-    def _heuristic_scan_process(self, proc):
-        """Fast local heuristic scan of a single process. No LLMs, no fork-heavy calls.
-
-        Returns (risk_level, reasons_list). Uses short subprocess calls with
-        tight timeouts so bulk scanning stays responsive.
-        """
-        pid = proc["pid"]
-        cmd = proc.get("command", "") or ""
-        # Canonical executable path — proc_pidpath is the source of truth.
-        # Falling back to cmd.split()[0] is unreliable because command strings
-        # often contain unescaped spaces (e.g. "/Applications/Google Chrome").
-        exe_path = _get_proc_path(pid) or ""
-
-        reasons = []
-
-        def _quick(cmd_argv, timeout=3):
-            try:
-                p = subprocess.Popen(cmd_argv, stdout=subprocess.PIPE,
-                                     stderr=subprocess.PIPE)
-                try:
-                    out, err = p.communicate(timeout=timeout)
-                except subprocess.TimeoutExpired:
-                    p.kill()
-                    p.wait()
-                    return None
-                combined = (out + b"\n" + err).decode("utf-8", errors="replace")
-                return (p.returncode, combined)
-            except (FileNotFoundError, OSError):
-                return None
-
-        # 1. Binary path exists
-        if exe_path.startswith("/") and not os.path.exists(exe_path):
-            reasons.append(("CRITICAL", f"binary missing: {exe_path}"))
-
-        # 2. Suspicious install location
-        if exe_path.startswith("/tmp/") or exe_path.startswith("/private/tmp/"):
-            reasons.append(("HIGH", f"binary in /tmp: {exe_path}"))
-        elif exe_path.startswith("/var/folders/"):
-            reasons.append(("MEDIUM", f"binary in /var/folders: {exe_path}"))
-
-        # 3. Code signature
-        if exe_path.startswith("/"):
-            sig = _quick(["codesign", "-v", exe_path])
-            if sig is not None:
-                rc, txt = sig
-                lower = txt.lower()
-                if rc != 0:
-                    if "code object is not signed" in lower or "not signed at all" in lower:
-                        reasons.append(("HIGH", "unsigned binary"))
-                    elif "invalid signature" in lower or "failed" in lower:
-                        reasons.append(("HIGH", "invalid code signature"))
-                    elif "adhoc" in lower or "ad-hoc" in lower:
-                        reasons.append(("MEDIUM", "ad-hoc signed"))
-
-        # 4. Suspicious DYLD env vars
-        try:
-            env = _get_proc_env(pid)
-        except Exception:
-            env = {}
-        for k in env:
-            if k in ("DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH"):
-                val = env[k]
-                # Truncate for display
-                short_val = val if len(val) < 60 else val[:57] + "..."
-                reasons.append(("HIGH", f"{k}={short_val}"))
-
-        # 5. Missing from libproc but visible to us (shouldn't happen — sanity)
-        if pid in getattr(self, "_hidden_pids", set()):
-            reasons.append(("CRITICAL", "appears hidden from proc_listallpids()"))
-
-        # Structured signature used by the next two checks
-        cs = {}
-        if exe_path.startswith("/") and os.path.exists(exe_path):
-            cs = _codesign_structured(exe_path) or {}
-        is_apple_signed = _is_apple_signed(exe_path, cs)
-
-        # 6. Gatekeeper / notarization (spctl). spctl's assess type is
-        #    "execute" here; it rejects anything that isn't a bundled .app
-        #    with the benign reason "the code is valid but does not seem to
-        #    be an app". That's a type mismatch, not a security finding, so
-        #    suppress it.  Real signing failures (invalid, revoked, unnotarized)
-        #    still surface.
-        if exe_path.startswith("/") and os.path.exists(exe_path):
-            gate = _check_gatekeeper(exe_path)
-            if gate and not gate.get("accepted"):
-                reason_text = gate.get("reason") or "spctl reject"
-                if "does not seem to be an app" not in reason_text \
-                        and "the code is valid" not in reason_text:
-                    reasons.append(("HIGH",
-                        f"Gatekeeper rejected: {reason_text[:100]}"))
-
-        # 7. Dangerous entitlements. Apple system binaries legitimately carry
-        #    entitlements like allow-jit / allow-dyld-environment-variables
-        #    (dyld itself, debugging tooling, etc.) — flagging them produces
-        #    ~100 false positives on a typical root-run scan, so we only flag
-        #    these on third-party binaries.
-        if cs and not is_apple_signed:
-            ent_set = _parse_entitlements_xml(cs.get("entitlements_xml", ""))
-            for ent, desc in _DANGEROUS_ENTITLEMENTS.items():
-                if ent in ent_set:
-                    reasons.append(("HIGH",
-                        f"entitlement {ent.split('.')[-1]}: {desc}"))
-
-        # 8. Dylibs loaded from user-writable paths (injection vector)
-        if exe_path.startswith("/") and os.path.exists(exe_path):
-            rc, otool_out, _ = _run_cmd_short(
-                ["otool", "-L", exe_path], timeout=5)
-            if rc is not None:
-                bad_dylibs = _otool_user_writable_dylibs(otool_out)
-                for dylib in bad_dylibs[:3]:  # cap noise
-                    reasons.append(("HIGH", f"dylib from user-writable path: {dylib}"))
-
-        # 9. YARA match on the on-disk binary
-        if exe_path.startswith("/") and os.path.exists(exe_path):
-            yara_hits = _yara_scan_file(exe_path)
-            for rule in yara_hits[:3]:  # cap noise
-                reasons.append(("HIGH", f"YARA match: {rule}"))
-
-        if not reasons:
-            return "LOW", []
-        worst = min(reasons, key=lambda r: self._RISK_RANK.get(r[0], 99))[0]
-        return worst, [r[1] for r in reasons]
-
-    def _bulk_scan_run(self, procs, max_workers=5, llm_confirm=True):
-        """Bulk scan: every process goes through heuristics + 3 LLMs + consensus.
-
-        Each work unit covers a single process end-to-end: heuristic pre-check,
-        artifact collection, parallel Claude/Codex/Gemini analysis, and
-        consensus synthesis. Progress ticks exactly once per process when that
-        entire pipeline completes.
-
-        Args:
-            procs: list of process dicts
-            max_workers: how many processes to pipeline concurrently. Each
-                process internally fans out to 3 LLM CLIs, so the effective
-                concurrent subprocess count is ~3x this.
-            llm_confirm: if False, skip the LLM pass (heuristic-only mode).
-                Used for fast standalone testing.
-
-        Returns a list of (risk, pid, cmd, reasons_list, llm_report) tuples
-        for processes with non-LOW risk. `llm_report` is None when llm_confirm
-        is False, otherwise the synthesized consensus text.
-        Honors `self._bulk_scan_cancel` for early termination.
-        """
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
-        total = len(procs)
-        self._bulk_scan_progress = (0, total)
-        findings = []
-        lock = threading.Lock()
-
-        def _analyze(proc):
-            """Full pipeline for one process. Returns a finding tuple or None."""
-            if self._bulk_scan_cancel:
-                return None
-
-            # Heuristic pre-check — gives quick signals and forms input context
-            try:
-                heur_risk, reasons = self._heuristic_scan_process(proc)
-            except Exception as e:
-                return (proc["pid"], proc.get("command", ""), "ERROR",
-                        [f"scan error: {e}"], None)
-
-            # When LLM confirmation is disabled, use heuristic verdict directly
-            if not llm_confirm:
-                return (proc["pid"], proc.get("command", ""), heur_risk,
-                        reasons, None)
-
-            # Every process goes through the 3 LLMs + synthesis
-            pid = proc["pid"]
-            exe_path = _get_proc_path(pid) or ""
-            if not exe_path:
-                # Kernel threads and similar have no exe path — keep heuristic
-                return (pid, proc.get("command", ""), heur_risk, reasons, None)
-
-            try:
-                artifacts = self._collect_inspect_artifacts(pid, exe_path)
-                analyses = self._run_llms_parallel(artifacts)
-                synth_tool, consensus = self._synthesize_analyses(analyses)
-                header = (f"(synthesized by {synth_tool})" if synth_tool
-                          else "(local fallback)")
-                llm_report = f"{header}\n{consensus}"
-
-                # Parse final risk from consensus; fall back to heuristic
-                final_risk = heur_risk
-                for line in consensus.splitlines():
-                    if line.startswith("CONSENSUS_RISK:"):
-                        level = line.split(":", 1)[1].strip().upper()
-                        if level in self._RISK_RANK:
-                            final_risk = level
-                        break
-                return (pid, proc.get("command", ""), final_risk, reasons,
-                        llm_report)
-            except Exception as e:
-                return (pid, proc.get("command", ""), heur_risk, reasons,
-                        f"[LLM analysis error: {e}]")
-
-        # Reset the live view at the start of a fresh scan
-        with self._bulk_scan_live_lock:
-            self._bulk_scan_live.clear()
-        self._bulk_scan_current = ""
-
-        completed = 0
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futures = [ex.submit(_analyze, p) for p in procs]
-            for f in as_completed(futures):
-                result = f.result()
-                with lock:
-                    completed += 1
-                    self._bulk_scan_progress = (completed, total)
-                if result is None:
-                    continue
-                pid, cmd, risk, reasons, llm_report = result
-                # Update "currently working on" hint to whatever just finished
-                short = (cmd or "").split()[0] if cmd else ""
-                self._bulk_scan_current = f"PID {pid}: {short[:60]}"
-                # Include non-LOW OR anything the LLM downgraded from a heuristic flag
-                if risk != "LOW" or reasons:
-                    finding = (risk, pid, cmd, reasons, llm_report)
-                    findings.append(finding)
-                    with self._bulk_scan_live_lock:
-                        self._bulk_scan_live.append(finding)
-        return findings
-
-    def _format_bulk_report(self, findings, total_scanned):
-        """Format bulk scan findings into display lines, sorted by severity.
-
-        Accepts either legacy 4-tuples (risk, pid, cmd, reasons) or 5-tuples
-        with an optional LLM report appended.
-        """
-        # Normalize tuples to 5 items for uniform handling
-        normalized = []
-        for f in findings:
-            if len(f) == 5:
-                normalized.append(f)
-            else:
-                normalized.append((*f, None))
-        normalized.sort(key=lambda f: (self._RISK_RANK.get(f[0], 99), f[1]))
-        lines = [
-            f"Bulk security scan \u2014 {total_scanned} process(es) scanned",
-            f"Flagged: {len(normalized)}  "
-            f"(CRITICAL: {sum(1 for f in normalized if f[0] == 'CRITICAL')}, "
-            f"HIGH: {sum(1 for f in normalized if f[0] == 'HIGH')}, "
-            f"MEDIUM: {sum(1 for f in normalized if f[0] == 'MEDIUM')})",
-            "",
-        ]
-        if not normalized:
-            lines.append("  No suspicious processes detected.")
-            return lines
-        current_risk = None
-        for risk, pid, cmd, reasons, llm_report in normalized:
-            if risk != current_risk:
-                lines.append(f"\u2500\u2500 [{risk}] \u2500\u2500")
-                current_risk = risk
-            path = _get_proc_path(pid) or (cmd[:70] if cmd else "(no command)")
-            lines.append(f"  PID {pid}: {path}")
-            for r in reasons:
-                lines.append(f"    \u2022 {r}")
-            if llm_report:
-                lines.append(f"    \u251c\u2500 LLM consensus:")
-                for line in llm_report.splitlines():
-                    lines.append(f"    \u2502  {line}")
-        return lines
-
-    def _toggle_bulk_scan_mode(self):
-        """Toggle bulk security scan mode."""
-        if self._bulk_scan_mode:
-            # Closing: cancel in-flight scan
-            self._bulk_scan_cancel = True
-            self._bulk_scan_mode = False
-            self._detail_focus = False
-            return
-        self._bulk_scan_lines = []
-        self._bulk_scan_scroll = 0
-        self._bulk_scan_progress = (0, 0)
-        self._bulk_scan_cancel = False
-        self._bulk_scan_mode = True
-        self._inspect_mode = False
-        self._hidden_scan_mode = False
-        self._net_mode = False
-        self._detail_focus = True
-        self._bulk_scan_loading = True
-        self._start_bulk_scan()
-
-    def _start_bulk_scan(self):
-        """Launch background thread to scan all processes."""
-        if self._bulk_scan_worker and self._bulk_scan_worker.is_alive():
-            return
-        self._bulk_scan_loading = True
-        self._bulk_scan_pending = None
-        procs = list(getattr(self, "_all_procs", []))
-
-        def _worker():
-            try:
-                findings = self._bulk_scan_run(
-                    procs, llm_confirm=not getattr(self, "_test_mode", False))
-                if self._bulk_scan_cancel:
-                    self._bulk_scan_pending = ["Scan cancelled."]
-                    return
-                lines = self._format_bulk_report(findings, len(procs))
-                self._bulk_scan_pending = lines
-            except Exception as e:
-                self._bulk_scan_pending = [f"[Bulk scan error: {e}]"]
-
-        self._bulk_scan_worker = threading.Thread(target=_worker, daemon=True)
-        self._bulk_scan_worker.start()
-
-    def _poll_bulk_scan_result(self):
-        """Check if bulk scan finished. Returns True if re-render is needed."""
-        if self._bulk_scan_pending is None:
-            return False
-        if not self._bulk_scan_mode:
-            self._bulk_scan_pending = None
-            self._bulk_scan_loading = False
-            return False
-        self._bulk_scan_lines = self._bulk_scan_pending
-        self._bulk_scan_pending = None
-        self._bulk_scan_loading = False
-        return True
 
     # ── Security Timeline (Endpoint Security / dtrace / praudit) ─────────
 
@@ -6557,8 +5831,6 @@ class ProcMonUI:
         self._llm_summary_pending["events"] = None
         self._llm_summary_loading["events"] = False
         self._inspect_mode = False
-        self._hidden_scan_mode = False
-        self._bulk_scan_mode = False
         self._net_mode = False
         self._detail_focus = True
         self._start_events_stream()
@@ -6749,8 +6021,6 @@ class ProcMonUI:
         self._traffic_scroll = 0
         self._traffic_mode = True
         self._inspect_mode = False
-        self._hidden_scan_mode = False
-        self._bulk_scan_mode = False
         self._net_mode = False
         if self._events_mode:
             self._stop_events_stream()
@@ -7690,8 +6960,6 @@ class ProcMonUI:
         self._llm_summary["inspect"] = None
         self._llm_summary_pending["inspect"] = None
         self._llm_summary_loading["inspect"] = False
-        self._hidden_scan_mode = False
-        self._bulk_scan_mode = False
         if getattr(self, "_events_mode", False):
             self._stop_events_stream()
             self._events_mode = False
@@ -8572,12 +7840,6 @@ class ProcMonUI:
                 f"The user is looking at a forensic inspect report for "
                 f"PID {self._inspect_pid} ({self._inspect_cmd}). Full report:")
             parts.append(self._summarize_chat_lines(self._inspect_lines))
-        elif self._hidden_scan_mode and self._hidden_scan_lines:
-            label = "Hidden processes + kernel modules scan"
-            parts.append(
-                "The user is looking at a deep hidden-process + kernel-module "
-                "scan. Full output:")
-            parts.append(self._summarize_chat_lines(self._hidden_scan_lines))
         elif self._audit_mode and self._audit_lines:
             title = self._audit_title()
             label = title
@@ -8611,25 +7873,6 @@ class ProcMonUI:
                 act = cur.get('action')
                 if act:
                     parts.append(f"  action:   {act}")
-        elif self._bulk_scan_mode:
-            label = "Bulk security scan"
-            if self._bulk_scan_lines:
-                parts.append(
-                    "The user is looking at a completed bulk security scan. "
-                    "Full report:")
-                parts.append(self._summarize_chat_lines(
-                    self._bulk_scan_lines))
-            else:
-                done, total = self._bulk_scan_progress
-                parts.append(
-                    f"The user is looking at a bulk security scan in progress "
-                    f"({done}/{total} processes scanned so far).")
-                with self._bulk_scan_live_lock:
-                    live = list(self._bulk_scan_live)
-                if live:
-                    parts.append("Live findings so far:")
-                    for risk, pid, cmd, reasons, _ in live[:30]:
-                        parts.append(f"  [{risk}] PID {pid}: {cmd} — {reasons}")
         elif self._net_mode and self._net_entries:
             label = f"Network: PID {self._net_pid} ({self._net_cmd})"
             parts.append(
@@ -9329,8 +8572,6 @@ class ProcMonUI:
             self._stop_traffic_stream()
         except Exception:
             pass
-        # Signal the bulk scanner (if running) to stop submitting new work
-        self._bulk_scan_cancel = True
         # Kill any still-running event subprocess explicitly
         proc = getattr(self, "_events_proc", None)
         if proc:
@@ -9362,29 +8603,19 @@ class ProcMonUI:
             if self._inspect_pending is not None:
                 if self._poll_inspect_result():
                     self.render()
-            if self._hidden_scan_pending is not None:
-                if self._poll_hidden_scan_result():
-                    self.render()
             if self._chat_pending is not None:
                 if self._poll_chat_result():
-                    self.render()
-            if self._bulk_scan_pending is not None:
-                if self._poll_bulk_scan_result():
                     self.render()
             if self._audit_pending is not None:
                 if self._poll_audit_result():
                     self.render()
-            # Poll per-scope LLM summaries (audit, hidden, inspect, events,
-            # bulk). Each slot is independent; rendering the finished panel
-            # kicks the viewport up by its height.
-            for _scope in ("audit", "hidden", "inspect",
-                           "events", "bulk"):
+            # Poll per-scope LLM summaries (audit, inspect, events). Each slot
+            # is independent; rendering the finished panel kicks the viewport
+            # up by its height.
+            for _scope in ("audit", "inspect", "events"):
                 if self._llm_summary_pending.get(_scope) is not None:
                     if self._poll_llm_summary(_scope):
                         self.render()
-            # Re-render to advance the bulk scan progress bar while running
-            if self._bulk_scan_mode and self._bulk_scan_loading:
-                self.render()
             # Re-render long audits so live phase/progress lines are visible
             if self._audit_mode and self._audit_loading:
                 self.render()
