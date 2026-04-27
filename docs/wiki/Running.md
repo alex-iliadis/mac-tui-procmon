@@ -40,7 +40,7 @@ sudo -n /usr/local/sbin/mac-tui-procmon-sudo
 The sudoers entry is:
 
 ```
-alex ALL=(root) NOPASSWD: /usr/local/sbin/mac-tui-procmon-sudo *
+youruser ALL=(root) NOPASSWD: /usr/local/sbin/mac-tui-procmon-sudo *
 ```
 
 ## CLI flags
