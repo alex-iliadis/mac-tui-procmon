@@ -1193,28 +1193,31 @@ class TestPerCellColoring:
         # Should not crash, selected row stays cyan
 
 
-class TestShortcutBarDynamic:
-    """Test shortcut bar shows Dyn toggle state."""
+class TestDynamicSortKeybind:
+    """`d` toggles dynamic sort from the main list. The shortcut is no longer
+    advertised in the bottom bar (it's in the Sort dialog), but the keybind
+    stays functional for muscle memory."""
 
-    def test_shortcut_shows_dyn(self, monitor):
-        """Shortcut bar shows 'd Dyn' when off."""
+    def test_d_toggles_dynamic_sort_off_to_on(self, monitor):
+        monitor._dynamic_sort = False
+        with patch.object(monitor, "_resort"):
+            monitor.handle_input(ord("d"))
+        assert monitor._dynamic_sort is True
+
+    def test_d_toggles_dynamic_sort_on_to_off(self, monitor):
+        monitor._dynamic_sort = True
+        with patch.object(monitor, "_resort"):
+            monitor.handle_input(ord("d"))
+        assert monitor._dynamic_sort is False
+
+    def test_shortcut_bar_does_not_show_dyn(self, monitor):
+        """`d Dyn` was moved into the Sort dialog; not in the main bar anymore."""
         monitor._dynamic_sort = False
         monitor.rows = [make_proc(pid=1)]
         monitor.stdscr.getmaxyx.return_value = (30, 120)
         monitor.render()
         calls = monitor.stdscr.addnstr.call_args_list
-        found = any("Dyn" in str(c) for c in calls)
-        assert found
-
-    def test_shortcut_shows_dyn_checkmark_when_on(self, monitor):
-        """Shortcut bar shows 'd Dyn✓' when on."""
-        monitor._dynamic_sort = True
-        monitor.rows = [make_proc(pid=1)]
-        monitor.stdscr.getmaxyx.return_value = (30, 120)
-        monitor.render()
-        calls = monitor.stdscr.addnstr.call_args_list
-        found = any("Dyn\u2713" in str(c) for c in calls)
-        assert found
+        assert not any("Dyn" in str(c) for c in calls)
 
 
 class TestDynamicSortConfig:
@@ -1330,15 +1333,15 @@ class TestCollectDataIntegration:
 
     def test_collect_data_computes_agg_fds(self, monitor):
         """collect_data walks flat list bottom-up to compute agg_fds."""
-        # Build tree: parent with child
-        parent = {"pid": 1, "ppid": 0, "rss_kb": 100, "cpu": 1.0, "cpu_ticks": 100,
+        # Use PIDs ≥ 2 — PID 1 (launchd) is filtered from the tree.
+        parent = {"pid": 2, "ppid": 0, "rss_kb": 100, "cpu": 1.0, "cpu_ticks": 100,
                   "threads": 1, "command": "/usr/bin/parent"}
-        child = {"pid": 2, "ppid": 1, "rss_kb": 50, "cpu": 0.5, "cpu_ticks": 50,
+        child = {"pid": 3, "ppid": 2, "rss_kb": 50, "cpu": 0.5, "cpu_ticks": 50,
                  "threads": 1, "command": "/usr/bin/child"}
         with patch("procmon.get_all_processes", return_value=[parent, child]), \
              patch("procmon.get_net_snapshot", return_value={}), \
-             patch("procmon.get_fd_counts", return_value={1: 10, 2: 5}), \
-             patch("procmon.get_cwds", return_value={1: "/", 2: "/tmp"}):
+             patch("procmon.get_fd_counts", return_value={2: 10, 3: 5}), \
+             patch("procmon.get_cwds", return_value={2: "/", 3: "/tmp"}):
             monitor._prev_cpu = {}
             monitor.prev_net = {}
             monitor.prev_time = None

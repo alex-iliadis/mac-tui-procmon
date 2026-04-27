@@ -74,4 +74,122 @@ def monitor():
     mon._net_pending = None
     mon._net_loading = False
     mon._all_procs = []
+    # Inspect mode
+    mon._inspect_mode = False
+    mon._inspect_pid = None
+    mon._inspect_cmd = ""
+    mon._inspect_lines = []
+    mon._inspect_scroll = 0
+    mon._inspect_worker = None
+    mon._inspect_pending = None
+    mon._inspect_loading = False
+    mon._inspect_phase = ""
+    # Hidden process detection
+    mon._hidden_pids = set()
+    mon._hidden_alert_count = 0
+    mon._hidden_scan_mode = False
+    mon._hidden_scan_lines = []
+    mon._hidden_scan_scroll = 0
+    mon._hidden_scan_worker = None
+    mon._hidden_scan_pending = None
+    mon._hidden_scan_loading = False
+    mon._last_hidden_check = 0.0
+    # Bulk scan
+    mon._bulk_scan_mode = False
+    mon._bulk_scan_lines = []
+    mon._bulk_scan_scroll = 0
+    mon._bulk_scan_worker = None
+    mon._bulk_scan_pending = None
+    mon._bulk_scan_loading = False
+    mon._bulk_scan_progress = (0, 0)
+    mon._bulk_scan_cancel = False
+    import threading as _threading
+    mon._bulk_scan_live = []
+    mon._bulk_scan_live_lock = _threading.Lock()
+    mon._bulk_scan_current = ""
+    # Debug log
+    import threading as _t
+    mon._log_messages = []
+    mon._log_lock = _t.Lock()
+    mon._log_max = 500
+    mon._log_mode = False
+    mon._log_scroll = 0
+    # Chat overlay
+    mon._chat_mode = False
+    mon._chat_messages = []
+    mon._chat_input = ""
+    mon._chat_cursor = 0
+    mon._chat_scroll = 0
+    mon._chat_loading = False
+    mon._chat_worker = None
+    mon._chat_pending = None
+    mon._chat_context_label = ""
+    mon._chat_context_text = ""
+    # Keyboard-hook detection
+    mon._keyscan_mode = False
+    mon._keyscan_lines = []
+    mon._keyscan_scroll = 0
+    mon._keyscan_worker = None
+    mon._keyscan_pending = None
+    mon._keyscan_loading = False
+    mon._keyscan_findings_structured = []
+    mon._keyscan_line_for_finding = []
+    mon._keyscan_cursor = 0
+    mon._keyscan_action_result = None
+    # LLM executive-summary state (per-scope)
+    mon._llm_summary = {"audit": None, "keyscan": None, "hidden": None,
+                        "inspect": None, "events": None, "bulk": None}
+    mon._llm_summary_pending = {"audit": None, "keyscan": None,
+                                 "hidden": None, "inspect": None,
+                                 "events": None, "bulk": None}
+    mon._llm_summary_loading = {"audit": False, "keyscan": False,
+                                 "hidden": False, "inspect": False,
+                                 "events": False, "bulk": False}
+    mon._llm_summary_worker = {"audit": None, "keyscan": None,
+                                "hidden": None, "inspect": None,
+                                "events": None, "bulk": None}
+    # Host security audits
+    mon._audit_mode = False
+    mon._audit_type = None
+    mon._audit_lines = []
+    mon._audit_scroll = 0
+    mon._audit_worker = None
+    mon._audit_pending = None
+    mon._audit_loading = False
+    mon._audit_progress_lines = []
+    mon._audit_progress_lock = _threading.Lock()
+    mon._audit_findings_structured = []
+    mon._audit_line_for_finding = []
+    mon._audit_cursor = 0
+    mon._audit_action_result = None
+    mon._audit_context_pid = None
+    mon._audit_context_cmd = ""
+    mon._audit_title_override = ""
+    # Live events
+    import threading
+    mon._events_mode = False
+    mon._events = []
+    mon._events_scroll = 0
+    mon._events_worker = None
+    mon._events_proc = None
+    mon._events_cancel = False
+    mon._events_source = ""
+    mon._events_filter = ""
+    mon._events_lock = threading.Lock()
+    mon._events_max = 500
+    mon._events_awaiting_summary = False
+    # Traffic Inspector
+    mon._traffic_mode = False
+    mon._traffic_proc = None
+    mon._traffic_flows = []
+    import threading as _t_traffic
+    mon._traffic_flows_lock = _t_traffic.Lock()
+    mon._traffic_flows_max = 500
+    mon._traffic_scroll = 0
+    mon._traffic_reader_thread = None
+    mon._traffic_port = 8080
+    mon._traffic_loading = False
+    mon._traffic_error = ""
+    mon._traffic_shim_path = ""
+    mon._test_select_pid = 0
     return mon

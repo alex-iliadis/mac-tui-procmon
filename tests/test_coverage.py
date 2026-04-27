@@ -111,11 +111,22 @@ class TestColHeader:
         hdr = monitor._col_header(120)
         assert "CPU%" in hdr
 
+    def test_small_width_does_not_raise(self, monitor):
+        hdr = monitor._col_header(20)
+        assert "PROCESS" in hdr
+        assert "PID" in hdr
+
 
 # ── _fmt_row ────────────────────────────────────────────────────────────
 
 
 class TestFmtRow:
+
+    def test_small_width_does_not_raise(self, monitor):
+        row = make_proc(command="/usr/bin/example")
+        result = monitor._fmt_row(row, 20)
+        assert "example" in result
+        assert "1" in result
 
     def test_basic_row(self, monitor):
         row = make_proc(pid=123, ppid=1, cpu=25.5, rss_kb=1024, threads=4, fds=10, forks=2)
@@ -277,6 +288,19 @@ class TestRenderShortcutBar:
         monitor._render_shortcut_bar(40, 120)
         monitor.stdscr.addnstr.assert_called()
 
+    def test_audit_mode_shows_page_shortcut(self, monitor):
+        monitor._detail_focus = True
+        monitor._audit_mode = True
+
+        monitor._render_shortcut_bar(40, 120)
+
+        rendered = "".join(
+            call.args[2] for call in monitor.stdscr.addnstr.call_args_list
+            if len(call.args) >= 3 and isinstance(call.args[2], str)
+        )
+        assert "PgU/D" in rendered
+        assert "Page" in rendered
+
 
 # ── _render_detail ──────────────────────────────────────────────────────
 
@@ -424,6 +448,24 @@ class TestRender:
         monitor.rows = [make_proc(pid=1, cpu=1.0, fds=1, net_in=0, net_out=0)]
         monitor.matched_count = 1
         monitor.render()
+
+    def test_render_header_brand_does_not_overlap_status_text(self, monitor):
+        puts = []
+
+        def record_put(y, x, text, attr=0):
+            puts.append((y, x, text))
+
+        monitor._put = record_put
+        monitor.rows = [make_proc(pid=1, cpu=1.0, fds=1, net_in=0, net_out=0)]
+        monitor.matched_count = 935
+        monitor.render()
+
+        brand = next((item for item in puts if item[0] == 0 and item[2] == " mac-tui-procmon "), None)
+        proc = next((item for item in puts if item[0] == 0 and item[2].startswith("— 935 processes")), None)
+
+        assert brand is not None
+        assert proc is not None
+        assert proc[1] >= brand[1] + len(brand[2])
 
 
 # ── _prompt_config ──────────────────────────────────────────────────────
@@ -734,13 +776,13 @@ class TestResort:
     def test_resort_maintains_selection(self, monitor):
         with patch("procmon.get_all_processes") as mock_gap:
             mock_gap.return_value = [
-                {"pid": 1, "ppid": 0, "cpu": 0.0, "cpu_ticks": 0,
-                 "rss_kb": 100, "threads": 1, "command": "/usr/bin/a"},
                 {"pid": 2, "ppid": 0, "cpu": 0.0, "cpu_ticks": 0,
+                 "rss_kb": 100, "threads": 1, "command": "/usr/bin/a"},
+                {"pid": 3, "ppid": 0, "cpu": 0.0, "cpu_ticks": 0,
                  "rss_kb": 200, "threads": 1, "command": "/usr/bin/b"},
             ]
-            monitor.rows = [make_proc(pid=1), make_proc(pid=2)]
-            monitor.selected = 1  # pid=2
+            monitor.rows = [make_proc(pid=2), make_proc(pid=3)]
+            monitor.selected = 1  # pid=3
             monitor._resort()
             # Selection should be maintained or adjusted
             assert monitor.selected >= 0
@@ -755,10 +797,15 @@ class TestToggleNetMode:
     def test_toggle_on(self, monitor):
         monitor.rows = [make_proc(pid=1, command="/usr/bin/test")]
         monitor._net_mode = False
+        monitor._inspect_mode = True  # should be closed by _toggle_net_mode
+        monitor._hidden_scan_mode = True  # should be closed by _toggle_net_mode
         with patch.object(monitor, "_start_net_fetch"):
             monitor._toggle_net_mode()
         assert monitor._net_mode is True
         assert monitor._detail_focus is True
+        # Modal exclusivity
+        assert monitor._inspect_mode is False
+        assert monitor._hidden_scan_mode is False
 
     def test_toggle_off(self, monitor):
         monitor._net_mode = True
@@ -997,38 +1044,55 @@ class TestMain:
 
     def test_main_runs(self):
         with patch("argparse.ArgumentParser.parse_args") as mock_args, \
+             patch("procmon._preflight", return_value=True), \
              patch("procmon._self_test", return_value=True), \
              patch("procmon._harden_process"), \
              patch("curses.wrapper") as mock_wrapper, \
              patch("signal.signal"):
             mock_args.return_value = argparse.Namespace(
-                name="test", interval=5.0, no_fd=False
+                name="test", interval=5.0, no_fd=False, skip_preflight=False,
+                capture_baseline=False, audit=""
             )
             procmon.main()
             mock_wrapper.assert_called_once()
 
     def test_main_keyboard_interrupt(self):
         with patch("argparse.ArgumentParser.parse_args") as mock_args, \
+             patch("procmon._preflight", return_value=True), \
              patch("procmon._self_test", return_value=True), \
              patch("procmon._harden_process"), \
              patch("curses.wrapper", side_effect=KeyboardInterrupt), \
              patch("signal.signal"):
             mock_args.return_value = argparse.Namespace(
-                name="", interval=5.0, no_fd=False
+                name="", interval=5.0, no_fd=False, skip_preflight=False,
+                capture_baseline=False, audit=""
             )
             procmon.main()  # should not raise
 
     def test_main_self_test_fail(self):
         with patch("argparse.ArgumentParser.parse_args") as mock_args, \
+             patch("procmon._preflight", return_value=True), \
              patch("procmon._self_test", return_value=False), \
              patch("procmon._harden_process"), \
              patch("curses.wrapper"), \
              patch("signal.signal"), \
              patch("time.sleep"):
             mock_args.return_value = argparse.Namespace(
-                name="", interval=5.0, no_fd=False
+                name="", interval=5.0, no_fd=False, skip_preflight=False,
+                capture_baseline=False, audit=""
             )
             procmon.main()
+
+    def test_main_preflight_abort(self):
+        with patch("argparse.ArgumentParser.parse_args") as mock_args, \
+             patch("procmon._preflight", return_value=False), \
+             patch("curses.wrapper") as mock_wrapper:
+            mock_args.return_value = argparse.Namespace(
+                name="", interval=5.0, no_fd=False, skip_preflight=False,
+                capture_baseline=False, audit=""
+            )
+            procmon.main()
+            mock_wrapper.assert_not_called()
 
 
 # ── _compute_cpu_deltas ─────────────────────────────────────────────────
@@ -1099,9 +1163,10 @@ class TestCollectData:
         with patch("procmon.get_all_processes") as mock_gap, \
              patch("procmon.get_net_snapshot", return_value={}), \
              patch("procmon.get_fd_counts", return_value={}), \
-             patch("procmon.get_cwds", return_value={}):
+             patch("procmon.get_cwds", return_value={}), \
+             patch("procmon._check_hidden_pids_quick", return_value=set()):
             mock_gap.return_value = [
-                {"pid": 1, "ppid": 0, "cpu": 0.0, "cpu_ticks": 100,
+                {"pid": 2, "ppid": 0, "cpu": 0.0, "cpu_ticks": 100,
                  "rss_kb": 1024, "threads": 2, "command": "/usr/bin/test"},
             ]
             monitor.collect_data()
@@ -1113,11 +1178,12 @@ class TestCollectData:
         with patch("procmon.get_all_processes") as mock_gap, \
              patch("procmon.get_net_snapshot", return_value={}), \
              patch("procmon.get_fd_counts", return_value={}), \
-             patch("procmon.get_cwds", return_value={}):
+             patch("procmon.get_cwds", return_value={}), \
+             patch("procmon._check_hidden_pids_quick", return_value=set()):
             mock_gap.return_value = [
-                {"pid": 1, "ppid": 0, "cpu": 0.0, "cpu_ticks": 100,
-                 "rss_kb": 1024, "threads": 2, "command": "/usr/bin/python3"},
                 {"pid": 2, "ppid": 0, "cpu": 0.0, "cpu_ticks": 100,
+                 "rss_kb": 1024, "threads": 2, "command": "/usr/bin/python3"},
+                {"pid": 3, "ppid": 0, "cpu": 0.0, "cpu_ticks": 100,
                  "rss_kb": 512, "threads": 1, "command": "/usr/bin/ruby"},
             ]
             monitor.collect_data()
@@ -1129,11 +1195,12 @@ class TestCollectData:
         with patch("procmon.get_all_processes") as mock_gap, \
              patch("procmon.get_net_snapshot", return_value={}), \
              patch("procmon.get_fd_counts", return_value={}), \
-             patch("procmon.get_cwds", return_value={}):
+             patch("procmon.get_cwds", return_value={}), \
+             patch("procmon._check_hidden_pids_quick", return_value=set()):
             mock_gap.return_value = [
-                {"pid": 1, "ppid": 0, "cpu": 0.0, "cpu_ticks": 100,
-                 "rss_kb": 1024, "threads": 2, "command": "/usr/bin/python3"},
                 {"pid": 2, "ppid": 0, "cpu": 0.0, "cpu_ticks": 100,
+                 "rss_kb": 1024, "threads": 2, "command": "/usr/bin/python3"},
+                {"pid": 3, "ppid": 0, "cpu": 0.0, "cpu_ticks": 100,
                  "rss_kb": 512, "threads": 1, "command": "/usr/bin/ruby"},
             ]
             monitor.collect_data()

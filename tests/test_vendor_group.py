@@ -247,23 +247,24 @@ class TestVendorGroupUI:
         found = any("[vendor]" in str(c) for c in calls)
         assert not found
 
-    def test_shortcut_bar_shows_grp(self, monitor):
+    def test_shortcut_bar_does_not_show_grp(self, monitor):
+        """`g Grp` was moved into the Sort dialog; not in the main bar anymore."""
         monitor._vendor_grouped = False
         monitor.rows = [make_proc(pid=1)]
         monitor.stdscr.getmaxyx.return_value = (30, 140)
         monitor.render()
         calls = monitor.stdscr.addnstr.call_args_list
-        found = any("Grp" in str(c) for c in calls)
-        assert found
+        assert not any("Grp" in str(c) for c in calls)
 
-    def test_shortcut_bar_shows_grp_check_when_on(self, monitor):
-        monitor._vendor_grouped = True
-        monitor.rows = [make_proc(pid=1)]
-        monitor.stdscr.getmaxyx.return_value = (30, 140)
-        monitor.render()
-        calls = monitor.stdscr.addnstr.call_args_list
-        found = any("Grp\u2713" in str(c) for c in calls)
-        assert found
+    def test_g_toggles_vendor_grouping(self, monitor):
+        """`g` keybinding still toggles vendor grouping even though it's not in the bar."""
+        monitor._vendor_grouped = False
+        with patch.object(monitor, "_resort"):
+            monitor.handle_input(ord("g"))
+        assert monitor._vendor_grouped is True
+        with patch.object(monitor, "_resort"):
+            monitor.handle_input(ord("g"))
+        assert monitor._vendor_grouped is False
 
 
 # ── Config Persistence ───────────────────────────────────────────────────
@@ -389,12 +390,13 @@ class TestVendorGroupWithDynamicSort:
 class TestSelectionPersistence:
 
     def _procs(self):
+        # Use PIDs ≥ 2 — PID 1 (launchd) is filtered from the tree.
         return [
-            {"pid": 1, "ppid": 0, "rss_kb": 100, "cpu": 1.0, "cpu_ticks": 100,
+            {"pid": 2, "ppid": 0, "rss_kb": 100, "cpu": 1.0, "cpu_ticks": 100,
              "threads": 1, "command": "/System/Library/daemon1"},
-            {"pid": 2, "ppid": 0, "rss_kb": 200, "cpu": 2.0, "cpu_ticks": 200,
+            {"pid": 3, "ppid": 0, "rss_kb": 200, "cpu": 2.0, "cpu_ticks": 200,
              "threads": 1, "command": "/usr/bin/daemon2"},
-            {"pid": 3, "ppid": 0, "rss_kb": 300, "cpu": 3.0, "cpu_ticks": 300,
+            {"pid": 4, "ppid": 0, "rss_kb": 300, "cpu": 3.0, "cpu_ticks": 300,
              "threads": 1, "command": "/Applications/Google Chrome.app/chrome"},
         ]
 

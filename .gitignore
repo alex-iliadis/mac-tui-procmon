@@ -7,6 +7,8 @@ __pycache__/
 dist/
 build/
 *.egg
+.coverage
+.pytest_cache/
 
 # Virtual environments
 venv/
