@@ -1,0 +1,146 @@
+# Features
+
+Every user-facing feature in `mac-tui-procmon`, grouped by what it does.
+
+## Process tree and metrics
+
+- **Direct libproc/sysctl snapshots.** No `fork()` per refresh, so
+  fork bombs and memory exhaustion don't kill the monitor.
+- **Per-process columns:** PID, command, CPU%, RSS, threads, FDs,
+  fork count, net-in rate, net-out rate, bytes in, bytes out, working
+  directory.
+- **Parent-tree grouping.** Children indent under their parent.
+  `←` collapses, `→` expands.
+- **Vendor grouping (`g`).** Group rows by code-sign team / vendor
+  rather than by process tree.
+- **Sort modes:**
+  - `m` — memory (RSS)
+  - `c` — CPU%
+  - `n` — net rate (in + out)
+  - `A` — alphabetical by command
+  - `V` — vendor (code-sign team)
+  - `R` — bytes received
+  - `O` — bytes sent
+  - Press the same key twice to invert.
+- **Dynamic sort (`d`).** When on, processes that exceed any alert
+  threshold float to the top of whatever sort mode is active.
+- **Sort dialog (`s`).** Full sort menu when you can't remember the
+  hotkey.
+- **Filter (`f`).** Substring filter on command name; supports
+  multiple include patterns and exclude patterns.
+
+## Per-process forensics
+
+- **Inspect (`I`)** — full forensic report for the selected process:
+  - Codesign team-id, authority, identifier, signed/ad-hoc/unsigned.
+  - Gatekeeper assessment.
+  - Apple-signed inference.
+  - YARA against the on-disk binary.
+  - YARA against memory regions (requires root — see
+    [the sudo wrapper](Running.md#sudo-wrapper)).
+  - VirusTotal lookup with malicious / suspicious counts.
+  - Memory-dump status badge: `[MEMORY-DUMPED]`,
+    `[MEMORY-SKIPPED]`, `[DISK-YARA]`, `[VT]`.
+- **Deep process triage (`T`)** — adds osquery telemetry, injection
+  / anti-debug evidence, binary trust profile, and a structured
+  finding list with cursor navigation.
+- **Hidden-process scan** — diffs `libproc` listing against
+  `sysctl`/`ps` to surface processes hidden from one of them.
+- **Keylogger / event-tap scan** — flags TCC Accessibility grants,
+  Input Method bundles, and CGEventTap owners. Press `D` on a
+  finding to remove the hook.
+- **Bulk scan (`F` from the Process Investigation menu)** — runs the
+  inspect pipeline across every visible process and aggregates
+  findings.
+
+## Per-process network
+
+- **Network mode (`N`)** — opens a panel showing every TCP/UDP
+  connection owned by the selected process (local + remote endpoints,
+  state, foreign DNS).
+- **`k` kills the highlighted connection** (without killing the
+  process itself).
+
+## Live telemetry
+
+- **Endpoint Security stream (`E` → Security timeline)** — live
+  feed of exec, auth, login-window, TCC, and XProtect events from
+  `eslogger`. Tail the buffer; press `c` to clear; press Esc once
+  to halt the stream and request an LLM summary; press Esc again
+  to close.
+- **Traffic Inspector (`E` → Traffic Inspector, experimental)** —
+  spins up a `mitmproxy` shim on a local port and surfaces flows
+  attributed to the selected process.
+
+## Alerts
+
+- **Threshold engine** with separate thresholds for CPU, memory MB,
+  threads, FDs, forks, net-in rate, net-out rate, total bytes in,
+  total bytes out.
+- **Audible alert** with a configurable cooldown and a max-count
+  cap (so you don't get drowned in beeps).
+- **Alert config dialog (`Shift+C`)** to set every threshold from the
+  TUI.
+- **Dynamic sort (`d`)** uses these thresholds — anything exceeding
+  surfaces above everything else.
+
+## SecAuditor bridge
+
+Host-wide security auditing moved to `mac-system-security` (formerly
+`secauditor`). The TUI bridges to it from several entry points:
+
+- **`a`** — opens the SecAuditor menu (launch the browser app, or
+  print the commands).
+- **`H`, `J`, `G`, `X`** — direct shortcuts to the SecAuditor bridge
+  panel.
+- **CLI compat:**
+  - `--audit <name>` — run a single audit headless and print results
+    (kept for scripts that hard-coded the old flags).
+  - `--automated-security-scan` / `--full-audit-report` — run the
+    whole SecAuditor suite headless with AI synthesis and write an
+    HTML report.
+
+## AI chat overlay
+
+- **`?`** opens an AI chat overlay from anywhere in the TUI.
+- **Auto-grounded:** the current screen is captured as the
+  conversation's system prompt, so follow-ups stay tied to what's
+  visible — process triage, audit findings, network view, events
+  stream, whatever you were looking at.
+- **Multi-provider:** Claude, Codex, Gemini are all supported; the
+  app picks based on available credentials.
+
+## Debug log
+
+- **`L`** opens an in-TUI log overlay from anywhere. Scrollable,
+  capped at 500 lines, written by every internal subsystem
+  (preflight, audit dispatch, secauditor bridge launch, traffic
+  shim, etc.).
+
+## Process control
+
+- **`k`** kills the selected process (`SIGTERM`).
+- In Network mode, `k` kills the highlighted connection only.
+
+## Headless modes
+
+- **`--capture-baseline`** writes a host-state snapshot to
+  `~/.secprocmon-baseline.json` (launch items, listening ports,
+  system extensions, config profiles) and exits.
+- **`--audit <name>`** runs one of the headless audits — see
+  [Running](Running.md) for the full list.
+- **`--automated-security-scan`** runs the full SecAuditor suite,
+  combines all available Claude / Codex / Gemini reviews, and writes
+  a summary-first HTML report.
+
+## Test instrumentation
+
+- **TUI snapshot capture.** Every menu and screen writes a
+  `<surface>.screen.json` artifact when `_tui_capture_dir` is set —
+  the regression tests use this to assert rendered text without
+  depending on a real terminal.
+- **Semantic screen / report assertions** in
+  `tui_screen_assertions.py` and `tui_report_assertions.py` so
+  tests describe screen content (not pixels).
+- **Coverage:** 9185 statements in the core impl module, 76%
+  covered by 1569+ tests.

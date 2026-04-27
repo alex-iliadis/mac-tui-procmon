@@ -1,0 +1,56 @@
+#!/bin/bash
+# mac-tui-procmon-sudo
+#
+# Thin sudo-aware launcher for the mac-tui-procmon TUI. Mirrors the
+# mac-system-security-serve wrapper so a single line in sudoers
+# (`alex ALL=(root) NOPASSWD: /usr/local/sbin/mac-tui-procmon-sudo *`)
+# is enough to run the monitor with the elevated capabilities it needs:
+# memory-region inspect, hidden-process kqueue scans, and the
+# Endpoint Security live event stream.
+#
+# Caller PATH/HOME are restored so user-installed CLIs (eslogger,
+# osquery, mitmdump, yara, codesign-checker, ...) resolve the same
+# under sudo as without it. The preflight already coalesces the two
+# but doing it here means `--help`, headless audits, and one-shot
+# scans behave identically.
+#
+# Install with `sudo scripts/install-sudo-wrapper.sh`.
+
+set -e
+
+# Resolve the repo path. The wrapper lives at /usr/local/sbin once
+# installed, so we can't compute the repo from $0; bake it in instead.
+REPO="/Users/alex/code/mac-tui-procmon"
+ENTRY="$REPO/mac_tui_procmon.py"
+
+if [ ! -f "$ENTRY" ]; then
+  echo "mac-tui-procmon-sudo: cannot find $ENTRY" >&2
+  echo "Edit REPO at the top of this wrapper if the repo moved." >&2
+  exit 2
+fi
+
+# Restore the caller's PATH/HOME under sudo so user CLIs resolve.
+if [ -n "$SUDO_USER" ]; then
+  CALLER_HOME="$(eval echo "~$SUDO_USER")"
+  CALLER_PATH="$(sudo -u "$SUDO_USER" -i bash -c 'echo $PATH' 2>/dev/null || true)"
+  if [ -n "$CALLER_HOME" ]; then
+    export HOME="$CALLER_HOME"
+  fi
+  if [ -n "$CALLER_PATH" ]; then
+    export PATH="$CALLER_PATH:$PATH"
+  fi
+fi
+
+# Prefer the homebrew Python the project's tests run against; fall
+# back to the first python3 on PATH.
+PY="/opt/homebrew/bin/python3"
+if [ ! -x "$PY" ]; then
+  PY="$(command -v python3 || true)"
+fi
+if [ -z "$PY" ]; then
+  echo "mac-tui-procmon-sudo: python3 not found" >&2
+  exit 3
+fi
+
+cd "$REPO"
+exec "$PY" "$ENTRY" "$@"
