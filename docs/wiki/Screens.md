@@ -36,24 +36,16 @@ Sectioned menu:
 - Endpoint Security → Security timeline.
 - Experimental → Traffic Inspector.
 
-## SecAuditor menu (`a`)
-
-Sectioned menu bridging to the `mac-system-security` browser/API
-product:
-- Open SecAuditor browser app.
-- Show SecAuditor commands.
-
 ## Inspect screen (`I` or via Process Investigation)
 
 Forensic report for the selected process. Sections include codesign,
-Gatekeeper, YARA disk, YARA memory (root-only), VirusTotal,
-binary-trust profile.
+Gatekeeper, YARA disk, YARA memory (root-only), binary-trust
+profile.
 
 ## Deep Process Triage (`T` or via Process Investigation)
 
 Augments inspect with osquery, injection / anti-debug findings, and
-a structured cursor over remediable findings. Press `D` on a finding
-to apply the suggested action.
+a structured cursor over remediable findings.
 
 ## Network connections (`N` or via Process Investigation)
 
@@ -64,11 +56,6 @@ local, remote, foreign DNS. `k` kills the highlighted connection.
 
 Diff of `libproc` against `sysctl` / `ps`. Surfaces processes
 visible to one but not the other.
-
-## Keylogger / event-tap scan
-
-TCC Accessibility grants, Input Method bundles, CGEventTap owners.
-Cursor over a finding and press `D` to remove the hook.
 
 ## Bulk scan
 
@@ -86,11 +73,6 @@ summary; second Esc closes.
 Experimental. mitmproxy shim attributing flows to the selected
 process. `c` clears flows.
 
-## SecAuditor bridge panel (`H` / `J` / `G` / `X`)
-
-Static panel with the SecAuditor commands and a launch confirmation
-when the browser/API product was started.
-
 ## AI chat overlay (`?`)
 
 Floating chat overlay. Auto-captures the underlying screen as the
@@ -103,8 +85,8 @@ or `q`.
 
 ## Snapshot artifacts
 
-When `_tui_capture_dir` is set, every screen render writes a
-`<surface>.screen.json` artifact: dimensions, visible lines,
-focused box. Used by regression tests in
+When the `MAC_TUI_PROCMON_CAPTURE_DIR` env var is set, every screen
+render writes a `<surface>.screen.json` artifact: dimensions,
+visible lines, focused box. Used by regression tests in
 `tests/test_tui_screen_capture.py` and
 `tests/test_tui_screen_assertions.py`.

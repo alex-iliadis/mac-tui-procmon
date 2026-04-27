@@ -125,27 +125,16 @@ def monitor():
     mon._chat_pending = None
     mon._chat_context_label = ""
     mon._chat_context_text = ""
-    # Keyboard-hook detection
-    mon._keyscan_mode = False
-    mon._keyscan_lines = []
-    mon._keyscan_scroll = 0
-    mon._keyscan_worker = None
-    mon._keyscan_pending = None
-    mon._keyscan_loading = False
-    mon._keyscan_findings_structured = []
-    mon._keyscan_line_for_finding = []
-    mon._keyscan_cursor = 0
-    mon._keyscan_action_result = None
     # LLM executive-summary state (per-scope)
-    mon._llm_summary = {"audit": None, "keyscan": None, "hidden": None,
+    mon._llm_summary = {"audit": None, "hidden": None,
                         "inspect": None, "events": None, "bulk": None}
-    mon._llm_summary_pending = {"audit": None, "keyscan": None,
+    mon._llm_summary_pending = {"audit": None,
                                  "hidden": None, "inspect": None,
                                  "events": None, "bulk": None}
-    mon._llm_summary_loading = {"audit": False, "keyscan": False,
+    mon._llm_summary_loading = {"audit": False,
                                  "hidden": False, "inspect": False,
                                  "events": False, "bulk": False}
-    mon._llm_summary_worker = {"audit": None, "keyscan": None,
+    mon._llm_summary_worker = {"audit": None,
                                 "hidden": None, "inspect": None,
                                 "events": None, "bulk": None}
     # Host security audits

@@ -57,16 +57,6 @@ class TestInspectMemoryBadges:
         joined = "\n".join(lines[:10])
         assert "[DISK-YARA] 2 hits" in joined
 
-    def test_vt_badge_when_found(self, monitor):
-        artifacts = {
-            "pid": 1, "exe_path": "/bin/x",
-            "yara_memory": {"success": False, "error": "skip"},
-            "yara_file": [],
-            "virustotal": {"found": True, "malicious": 7, "suspicious": 2},
-        }
-        lines = monitor._format_inspect_report(artifacts)
-        joined = "\n".join(lines[:10])
-        assert "[VT] 7 malicious" in joined
 
 
 # ── 2. LLM summary infrastructure ─────────────────────────────────────────
@@ -172,45 +162,11 @@ class TestLlmSummaryInfrastructure:
 # ── Audit mode kicks off summary on scan complete ─────────────────────────
 
 
-class TestAuditModeTriggersSummary:
-    def test_poll_audit_result_starts_summary(self, monitor):
-        monitor._audit_mode = True
-        monitor._audit_type = "network"
-        monitor._audit_pending = ["line"]
-        monitor._audit_findings_structured = [
-            {"severity": "HIGH", "message": "x", "action": None}]
-        with patch.object(monitor, "_start_llm_summary") as start:
-            monitor._poll_audit_result()
-        start.assert_called_once()
-        scope, title, findings = start.call_args[0]
-        assert scope == "audit"
-        assert "Network" in title
-        assert len(findings) == 1
-
-    def test_toggle_audit_mode_clears_stale_summary(self, monitor):
-        monitor._llm_summary["audit"] = ["stale", "summary"]
-        monitor._llm_summary_pending["audit"] = ["pending"]
-        with patch.object(monitor, "_start_audit"):
-            monitor._toggle_audit_mode("network")
-        assert monitor._llm_summary["audit"] is None
-        assert monitor._llm_summary_pending["audit"] is None
 
 
 # ── 3. Keyscan summary trigger ───────────────────────────────────────────
 
 
-class TestKeyscanSummaryTrigger:
-    def test_poll_keyscan_starts_summary(self, monitor):
-        monitor._keyscan_mode = True
-        monitor._keyscan_pending = ["line"]
-        monitor._keyscan_findings_structured = [
-            {"severity": "HIGH", "message": "x",
-             "action": {"type": "delete_tcc"}}]
-        monitor._keyscan_line_for_finding = [0]
-        with patch.object(monitor, "_start_llm_summary") as start:
-            monitor._poll_keyscan_result()
-        start.assert_called_once()
-        assert start.call_args[0][0] == "keyscan"
 
 
 # ── 4. Hidden-scan summary trigger ───────────────────────────────────────

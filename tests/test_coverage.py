@@ -1040,64 +1040,6 @@ class TestResolveIp:
 # ── main ────────────────────────────────────────────────────────────────
 
 
-class TestMain:
-
-    def test_main_runs(self):
-        with patch("argparse.ArgumentParser.parse_args") as mock_args, \
-             patch("procmon._preflight", return_value=True), \
-             patch("procmon._self_test", return_value=True), \
-             patch("procmon._harden_process"), \
-             patch("curses.wrapper") as mock_wrapper, \
-             patch("signal.signal"):
-            mock_args.return_value = argparse.Namespace(
-                name="test", interval=5.0, no_fd=False, skip_preflight=False,
-                capture_baseline=False, audit=""
-            )
-            procmon.main()
-            mock_wrapper.assert_called_once()
-
-    def test_main_keyboard_interrupt(self):
-        with patch("argparse.ArgumentParser.parse_args") as mock_args, \
-             patch("procmon._preflight", return_value=True), \
-             patch("procmon._self_test", return_value=True), \
-             patch("procmon._harden_process"), \
-             patch("curses.wrapper", side_effect=KeyboardInterrupt), \
-             patch("signal.signal"):
-            mock_args.return_value = argparse.Namespace(
-                name="", interval=5.0, no_fd=False, skip_preflight=False,
-                capture_baseline=False, audit=""
-            )
-            procmon.main()  # should not raise
-
-    def test_main_self_test_fail(self):
-        with patch("argparse.ArgumentParser.parse_args") as mock_args, \
-             patch("procmon._preflight", return_value=True), \
-             patch("procmon._self_test", return_value=False), \
-             patch("procmon._harden_process"), \
-             patch("curses.wrapper"), \
-             patch("signal.signal"), \
-             patch("time.sleep"):
-            mock_args.return_value = argparse.Namespace(
-                name="", interval=5.0, no_fd=False, skip_preflight=False,
-                capture_baseline=False, audit=""
-            )
-            procmon.main()
-
-    def test_main_preflight_abort(self):
-        with patch("argparse.ArgumentParser.parse_args") as mock_args, \
-             patch("procmon._preflight", return_value=False), \
-             patch("curses.wrapper") as mock_wrapper:
-            mock_args.return_value = argparse.Namespace(
-                name="", interval=5.0, no_fd=False, skip_preflight=False,
-                capture_baseline=False, audit=""
-            )
-            procmon.main()
-            mock_wrapper.assert_not_called()
-
-
-# ── _compute_cpu_deltas ─────────────────────────────────────────────────
-
-
 class TestComputeCpuDeltas:
 
     def test_first_call_zero_cpu(self, monitor):

@@ -10,62 +10,67 @@ python3 mac_tui_procmon.py firefox -i 2
 sudo -n /usr/local/sbin/mac-tui-procmon-sudo --skip-preflight
 ```
 
-Compatibility entrypoints `procmon.py` and `secprocmon.py` remain.
+`procmon.py` is the only legacy compatibility shim.
 
 ## Features
 
-- Live process tree with parent grouping, vendor grouping, and 7
-  sort modes (memory / CPU / net rate / alpha / vendor / bytes
+- **Live process tree** with parent grouping, vendor grouping, and
+  seven sort modes (memory / CPU / net rate / alpha / vendor / bytes
   in / bytes out). Press the same sort key twice to invert.
-- Dynamic sort (`d`) — alert-threshold violators float above
+- **Dynamic sort (`d`)** — alert-threshold violators float above
   everything else.
-- Per-process forensics (`I`): codesign + Gatekeeper + Apple-signed,
-  YARA on disk, YARA on memory (root), VirusTotal lookup,
+- **Per-process inspect (`I`)**: codesign + Gatekeeper +
+  Apple-signed inference, YARA on disk, YARA on memory (root),
   binary-trust profile, badges.
-- Deep process triage (`T`): adds osquery, injection / anti-debug
-  evidence, and a structured cursor over remediable findings.
-- Per-process network (`N`): connection list with `k` to kill an
-  individual connection without killing the process.
-- Hidden-process scan, keylogger / event-tap scan with one-key
-  removal, bulk YARA scan over every visible process.
-- Endpoint Security stream (`E` → Security timeline): exec, auth,
-  login, TCC, XProtect events. Two-stage Esc — first stops the
-  stream and requests an LLM summary, second closes.
-- Experimental Traffic Inspector (mitmproxy) attributing flows to
+- **Deep process triage (`T`)**: adds osquery, injection /
+  anti-debug evidence, and a structured cursor over remediable
+  findings.
+- **Per-process network (`N`)**: connection list with `k` to kill
+  one connection without killing the process.
+- **Hidden-process scan**, **bulk YARA scan** across visible
+  processes.
+- **Endpoint Security stream (`E` → Security timeline)**: per-process
+  exec, auth, login, TCC, XProtect events. Two-stage Esc — first
+  stops the stream and requests an LLM summary, second closes.
+- **Experimental Traffic Inspector** (mitmproxy) attributing flows to
   the selected process.
-- Alert engine with thresholds for CPU, memory, threads, FDs,
+- **Alert engine** with thresholds for CPU, memory, threads, FDs,
   forks, net rates, and total bytes.
-- AI chat overlay (`?`) auto-grounded in whatever screen you have
-  open.
-- Debug log overlay (`L`) viewable from anywhere.
-- TUI snapshot capture: every screen writes a `*.screen.json`
+- **AI chat overlay (`?`)** auto-grounded in whatever screen you
+  have open.
+- **Debug log overlay (`L`)** viewable from anywhere.
+- **TUI snapshot capture**: every screen writes a `*.screen.json`
   artifact for regression tests.
 
-Host-wide security audits (TCC, kernel, persistence, browser
-extensions, CVE intelligence, full security score, remediation
-workflows) live in [`mac-system-security`](https://github.com/alex-iliadis/mac-system-security).
-The TUI bridges to it via `H` / `J` / `G` / `X` and the `a` menu.
+This tool is process-monitoring only. Host-wide security posture
+(TCC sweeps, kernel/boot, persistence, browser extensions, CVE
+intelligence, full security score, remediation workflows, headless
+audit reports) lives in
+[`mac-system-security`](https://github.com/alex-iliadis/mac-system-security).
 
 ## Sudo wrapper
 
-For features that need root (memory-region YARA in Inspect, the
-hidden-process kqueue scan, `eslogger`), install the wrapper:
+For root-only features (memory-region YARA in Inspect, the
+hidden-process kqueue scan, `eslogger`):
 
 ```bash
 sudo scripts/install-sudo-wrapper.sh
 ```
 
-After install, the canonical privileged invocation is:
-
-```bash
-sudo -n /usr/local/sbin/mac-tui-procmon-sudo
-sudo -n /usr/local/sbin/mac-tui-procmon-sudo --capture-baseline
-```
-
-Sudoers entry installed at `/etc/sudoers.d/mac-tui-procmon`:
+This installs `scripts/mac-tui-procmon-sudo` to
+`/usr/local/sbin/mac-tui-procmon-sudo` (root:wheel, mode 0755) and
+drops `/etc/sudoers.d/mac-tui-procmon` after a `visudo -c` syntax
+check. Sudoers entry:
 
 ```
 alex ALL=(root) NOPASSWD: /usr/local/sbin/mac-tui-procmon-sudo *
+```
+
+After install:
+
+```bash
+sudo -n /usr/local/sbin/mac-tui-procmon-sudo --help
+sudo -n /usr/local/sbin/mac-tui-procmon-sudo
 ```
 
 ## Testing
@@ -80,10 +85,10 @@ alex ALL=(root) NOPASSWD: /usr/local/sbin/mac-tui-procmon-sudo *
     --cov-report=term-missing
 ```
 
-Local: `1569 passed`, 76% coverage on `mac_tui_procmon_impl.py`
-(9185 statements). The 100% number on the public shim is an
-artifact of measuring the re-export module — the wiki's
-[Testing](docs/wiki/Testing.md) page has the full breakdown.
+Local: **1036 passed**, 75% coverage on `mac_tui_procmon_impl.py`
+(5770 statements). The 100% number on the public shim is an
+artifact of measuring the re-export module — see the wiki's
+[Testing](docs/wiki/Testing.md) page for the full breakdown.
 
 ## Wiki
 

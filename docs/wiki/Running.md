@@ -8,16 +8,16 @@ python3 mac_tui_procmon.py firefox -i 2
 sudo -n /usr/local/sbin/mac-tui-procmon-sudo --skip-preflight
 ```
 
-`procmon.py` and `secprocmon.py` remain as compatibility shims.
+`procmon.py` remains as a compatibility shim.
 
 ## Sudo wrapper
 
 Some features need root: memory-region YARA inside Inspect, the
-hidden-process kqueue scan, and `eslogger` for the Endpoint Security
-stream. The wrapper at `scripts/mac-tui-procmon-sudo` is the
-canonical privileged entry point — it preserves the caller's PATH /
-HOME so user-installed CLIs (eslogger, osquery, mitmdump, yara,
-codesign-checker, …) resolve under sudo the same way they do
+hidden-process kqueue scan, and `eslogger` for the Endpoint
+Security stream. The wrapper at `scripts/mac-tui-procmon-sudo` is
+the canonical privileged entry point — it preserves the caller's
+PATH / HOME so user-installed CLIs (eslogger, osquery, mitmdump,
+yara, codesign-checker, …) resolve under sudo the same way they do
 without it.
 
 Install once with:
@@ -35,7 +35,6 @@ After install:
 ```bash
 sudo -n /usr/local/sbin/mac-tui-procmon-sudo --help
 sudo -n /usr/local/sbin/mac-tui-procmon-sudo
-sudo -n /usr/local/sbin/mac-tui-procmon-sudo --capture-baseline
 ```
 
 The sudoers entry is:
@@ -44,35 +43,36 @@ The sudoers entry is:
 alex ALL=(root) NOPASSWD: /usr/local/sbin/mac-tui-procmon-sudo *
 ```
 
-(Replaces the legacy `secprocmon-sudo` entry. The
-`secauditor-serve` entry belongs to `mac-system-security`, not this
-repo, and is unaffected.)
-
 ## CLI flags
 
-| Flag                         | Effect                                                       |
-|------------------------------|--------------------------------------------------------------|
-| `name` (positional)          | Process-name substring filter                                |
-| `-i / --interval SECS`       | Refresh interval (default 5)                                 |
-| `--no-fd`                    | Skip file-descriptor counting (faster)                       |
-| `--skip-preflight`           | Skip external-tool dependency check                          |
-| `--capture-baseline`         | Write `~/.secprocmon-baseline.json` and exit                 |
-| `--audit <name>`             | Run a single SecAuditor audit headless and print the report  |
-| `--automated-security-scan`  | Run the full SecAuditor suite + AI synthesis, write HTML     |
-| `--full-audit-report`        | Alias for `--automated-security-scan`                        |
-| `--no-html-report`           | With `--automated-security-scan`: skip the HTML artifact     |
-| `--no-open-report`           | With `--automated-security-scan`: write HTML but don't open  |
+| Flag                  | Effect                                         |
+|-----------------------|------------------------------------------------|
+| `name` (positional)   | Process-name substring filter                  |
+| `-i / --interval SECS`| Refresh interval (default 5)                   |
+| `--no-fd`             | Skip file-descriptor counting (faster)         |
+| `--skip-preflight`    | Skip external-tool dependency check            |
 
-### Available `--audit` names
+That's the whole flag set. Host-wide auditing, baseline capture,
+and full security scans are intentionally not here — they live in
+[`mac-system-security`](https://github.com/alex-iliadis/mac-system-security):
 
-`network`, `dns`, `persistence`, `system_hardening`, `kernel_boot`,
-`patch_posture`, `tcc`, `browser_exts`, `usb_hid`, `shell_dotfiles`,
-`installed_software`, `process_entitlements`,
-`injection_antidebug`, `filesystem_integrity`,
-`sensitive_paths_delta`, `keychain`, `auth_stack`,
-`binary_authorization`, `tool_correlation`, `packages`,
-`baseline_delta`, `rule_engine`, `global_score`.
+```bash
+python3 -m mac_system_security audit <name>
+python3 -m mac_system_security full-scan --html --open-html
+python3 -m mac_system_security capture-baseline
+```
 
-These are kept for backwards compatibility with old scripts. New
-scripts should use the `secauditor` CLI or its browser/API product
-directly.
+## Environment variables
+
+| Variable                                  | Effect                                   |
+|-------------------------------------------|------------------------------------------|
+| `MAC_TUI_PROCMON_CHAT_TIMEOUT`            | Chat-overlay LLM timeout (seconds)       |
+| `MAC_TUI_PROCMON_TEST_MODE`               | Skip background workers (test fixtures)  |
+| `MAC_TUI_PROCMON_CAPTURE_DIR`             | Directory for `*.screen.json` snapshots  |
+| `MAC_TUI_PROCMON_CAPTURE_ACTION`          | Snapshot-file basename                   |
+| `MAC_TUI_PROCMON_TEST_ACTION`             | Auto-trigger an action on TUI start      |
+| `MAC_TUI_PROCMON_TEST_SELECT_PID`         | Auto-select this PID on start            |
+| `MAC_TUI_PROCMON_TEST_ALLOW_LLM`          | Allow real LLM CLIs in test mode         |
+| `MAC_TUI_PROCMON_ES_SELECT_PREFIXES`      | Path-prefixes filter for Endpoint stream |
+| `MAC_TUI_PROCMON_INJECTION_PIDS`          | PIDs to scan for injection in triage     |
+| `MAC_TUI_PROCMON_SUDO_NONINTERACTIVE`     | Skip sudo password prompts under `-n`    |

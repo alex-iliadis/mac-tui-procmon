@@ -1,7 +1,6 @@
 # Keybindings
 
-Every key the TUI binds, by mode. `Shift` is shown explicitly only
-when the key would otherwise collide with a lowercase binding.
+Every key the TUI binds, by mode.
 
 ## Main process list
 
@@ -24,11 +23,9 @@ when the key would otherwise collide with a lowercase binding.
 | `f`            | Open the filter dialog                                |
 | `F`            | Open Process Investigation menu                       |
 | `E`            | Open Live Telemetry menu                              |
-| `a`            | Open SecAuditor bridge menu                           |
 | `N`            | Toggle Network mode for the selected process          |
 | `I`            | Toggle Inspect mode for the selected process          |
 | `T`            | Toggle Deep Process Triage for the selected process   |
-| `H` / `J` / `G` / `X` | Open SecAuditor bridge panel                  |
 | `Shift+C`      | Open alert-config dialog                              |
 | `k`            | Kill the selected process (`SIGTERM`)                 |
 | `L`            | Toggle debug log overlay                              |
@@ -39,8 +36,8 @@ when the key would otherwise collide with a lowercase binding.
 
 ## Detail focus — common keys
 
-These work in every detail mode (Inspect, Hidden scan, Keyscan,
-Audit, Bulk scan, Events, Traffic, Network):
+These work in every detail mode (Inspect, Hidden scan, Audit, Bulk
+scan, Events, Traffic, Network):
 
 | Key            | Action                            |
 |----------------|-----------------------------------|
@@ -62,20 +59,12 @@ Audit, Bulk scan, Events, Traffic, Network):
 |-----|-----------------------------|
 | `H` | Toggle hidden-scan mode off |
 
-## Keyscan mode (keylogger / hook detection)
+## Audit mode (used by Deep Process Triage)
 
 | Key       | Action                                                  |
 |-----------|---------------------------------------------------------|
 | `↑` / `↓` | Move structured cursor (or scroll if no findings)       |
-| `D` / `d` | Remove the hook under the cursor (TCC, IM, EventTap)    |
-
-## Audit mode
-
-| Key       | Action                                                  |
-|-----------|---------------------------------------------------------|
-| `↑` / `↓` | Move structured cursor (or scroll if no findings)       |
-| `D` / `d` | Apply the suggested remediation for the current finding |
-| `R` / `r` | Re-run the audit                                        |
+| `R` / `r` | Re-run the triage                                       |
 
 ## Bulk-scan mode
 
@@ -86,25 +75,25 @@ Audit, Bulk scan, Events, Traffic, Network):
 
 ## Events mode (Endpoint Security stream)
 
-| Key   | Action                                                         |
-|-------|----------------------------------------------------------------|
-| `c`   | Clear the event buffer                                         |
-| `Esc` | Stage 1: stop stream, request LLM summary. Stage 2: close.     |
-| `q`   | Stop stream and quit                                           |
+| Key   | Action                                                     |
+|-------|------------------------------------------------------------|
+| `c`   | Clear the event buffer                                     |
+| `Esc` | Stage 1: stop stream, request LLM summary. Stage 2: close. |
+| `q`   | Stop stream and quit                                       |
 
 ## Traffic Inspector
 
-| Key | Action                                  |
-|-----|-----------------------------------------|
-| `c` | Clear captured flows                    |
-| `Esc`/`q` | Stop the mitmproxy shim and close |
+| Key       | Action                                  |
+|-----------|-----------------------------------------|
+| `c`       | Clear captured flows                    |
+| `Esc`/`q` | Stop the mitmproxy shim and close       |
 
 ## Network mode
 
-| Key | Action                                                 |
-|-----|--------------------------------------------------------|
-| `k` | Kill the highlighted connection                        |
-| `N` | Toggle network mode off                                |
+| Key | Action                                 |
+|-----|----------------------------------------|
+| `k` | Kill the highlighted connection        |
+| `N` | Toggle network mode off                |
 
 ## Chat overlay (`?`)
 

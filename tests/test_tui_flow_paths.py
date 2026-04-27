@@ -62,47 +62,6 @@ class TestHiddenScanPaging:
 # ── Keyscan mode: scroll fallback + paging ───────────────────────────────
 
 
-class TestKeyscanScrollFallback:
-    """When _keyscan_findings_structured is empty, UP/DOWN fall back to
-    raw scroll instead of moving a structured cursor."""
-
-    def _enter(self, monitor, structured=False):
-        monitor._keyscan_mode = True
-        monitor._detail_focus = True
-        monitor._keyscan_findings_structured = (
-            [{"severity": "HIGH", "message": "x"}] if structured else [])
-        monitor._keyscan_scroll = 0
-        monitor._keyscan_cursor = 0
-        monitor._keyscan_lines = ["l%d" % i for i in range(50)]
-        monitor.stdscr.getmaxyx.return_value = (30, 120)
-
-    def test_up_falls_back_to_scroll_when_unstructured(self, monitor):
-        self._enter(monitor, structured=False)
-        monitor._keyscan_scroll = 3
-        monitor.handle_input(curses.KEY_UP)
-        assert monitor._keyscan_scroll == 2
-
-    def test_up_clamps_at_zero_in_fallback(self, monitor):
-        self._enter(monitor, structured=False)
-        monitor._keyscan_scroll = 0
-        monitor.handle_input(curses.KEY_UP)
-        assert monitor._keyscan_scroll == 0
-
-    def test_down_falls_back_to_scroll_when_unstructured(self, monitor):
-        self._enter(monitor, structured=False)
-        monitor.handle_input(curses.KEY_DOWN)
-        assert monitor._keyscan_scroll == 1
-
-    def test_page_down_jumps_scroll(self, monitor):
-        self._enter(monitor, structured=False)
-        monitor.handle_input(curses.KEY_NPAGE)
-        assert monitor._keyscan_scroll == monitor._page_size()
-
-    def test_page_up_clamps_at_zero(self, monitor):
-        self._enter(monitor, structured=False)
-        monitor._keyscan_scroll = 4
-        monitor.handle_input(curses.KEY_PPAGE)
-        assert monitor._keyscan_scroll == 0
 
 
 # ── Audit mode: every key handler ─────────────────────────────────────────
@@ -155,17 +114,7 @@ class TestAuditModeKeys:
         monitor.handle_input(curses.KEY_NPAGE)
         assert monitor._audit_scroll == monitor._page_size()
 
-    def test_d_key_remediates(self, monitor):
-        self._enter(monitor, structured=True)
-        with patch.object(monitor, "_audit_remediate_current") as rem:
-            monitor.handle_input(ord("d"))
-            rem.assert_called_once()
 
-    def test_D_key_remediates(self, monitor):
-        self._enter(monitor, structured=True)
-        with patch.object(monitor, "_audit_remediate_current") as rem:
-            monitor.handle_input(ord("D"))
-            rem.assert_called_once()
 
     def test_r_key_starts_rescan(self, monitor):
         self._enter(monitor)
@@ -416,35 +365,10 @@ class TestMainModeHotkeys:
             monitor.handle_input(ord("T"))
             t.assert_called_once()
 
-    def test_H_opens_secauditor_bridge(self, monitor):
-        monitor.rows = _rows()
-        with patch.object(monitor, "_show_secauditor_bridge") as br:
-            monitor.handle_input(ord("H"))
-            br.assert_called_once()
 
-    def test_J_opens_secauditor_bridge(self, monitor):
-        monitor.rows = _rows()
-        with patch.object(monitor, "_show_secauditor_bridge") as br:
-            monitor.handle_input(ord("J"))
-            br.assert_called_once()
 
-    def test_G_opens_secauditor_bridge(self, monitor):
-        monitor.rows = _rows()
-        with patch.object(monitor, "_show_secauditor_bridge") as br:
-            monitor.handle_input(ord("G"))
-            br.assert_called_once()
 
-    def test_X_opens_secauditor_bridge(self, monitor):
-        monitor.rows = _rows()
-        with patch.object(monitor, "_show_secauditor_bridge") as br:
-            monitor.handle_input(ord("X"))
-            br.assert_called_once()
 
-    def test_a_opens_audit_menu(self, monitor):
-        monitor.rows = _rows()
-        with patch.object(monitor, "_prompt_audit") as p:
-            monitor.handle_input(ord("a"))
-            p.assert_called_once()
 
     def test_F_opens_forensic_menu(self, monitor):
         monitor.rows = _rows()
@@ -480,7 +404,7 @@ class TestTabEnablesDetailFocus:
 
     @pytest.mark.parametrize("flag", [
         "_inspect_mode", "_hidden_scan_mode", "_net_mode",
-        "_bulk_scan_mode", "_events_mode", "_keyscan_mode",
+        "_bulk_scan_mode", "_events_mode",
         "_audit_mode", "_traffic_mode",
     ])
     def test_tab_enters_focus_in_each_mode(self, monitor, flag):
@@ -510,12 +434,6 @@ class TestMainModeEscapeClosesSpecialModes:
         assert result is True
         assert monitor._hidden_scan_mode is False
 
-    def test_escape_closes_keyscan_mode(self, monitor):
-        monitor.rows = _rows()
-        monitor._keyscan_mode = True
-        result = monitor.handle_input(27)
-        assert result is True
-        assert monitor._keyscan_mode is False
 
     def test_escape_closes_bulk_scan_mode(self, monitor):
         monitor.rows = _rows()

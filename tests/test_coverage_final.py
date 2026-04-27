@@ -81,25 +81,6 @@ class TestAuditMoveCursorEdge:
 
 
 class TestCollectChatContextExtras:
-    def test_audit_context_is_compacted_for_chat(self, monitor):
-        monitor._audit_mode = True
-        monitor._audit_type = "auth_stack"
-        monitor._audit_lines = [f"line {i}" for i in range(120)]
-        monitor._audit_findings_structured = [{
-            "severity": "HIGH",
-            "message": "Suspicious auth plugin",
-            "evidence": "/Library/Security/SecurityAgentPlugins/Component.bundle",
-            "action": None,
-        }]
-        monitor._audit_line_for_finding = [5]
-        monitor._audit_cursor = 0
-
-        label, text = monitor._collect_chat_context()
-        assert "Authentication" in label
-        assert "Suspicious auth plugin" in text
-        assert "Component.bundle" in text
-        assert "lines omitted for chat context" in text
-        assert "line 119" in text
 
     def test_inspect_mode_context(self, monitor):
         monitor._inspect_mode = True
@@ -177,27 +158,7 @@ class TestCollectChatContextExtras:
 
 
 class TestPromptAuditTopEntry:
-    def test_enter_opens_secauditor_bridge(self, monitor):
-        import curses
-        monitor.stdscr.getmaxyx.return_value = (40, 120)
-        monitor.stdscr.getch.side_effect = [10]  # Enter on default (first)
-        called = []
-        with patch("curses.color_pair", side_effect=lambda n: n << 8), \
-             patch.object(monitor, "_put"), \
-             patch.object(monitor, "_dispatch_audit_bridge",
-                          side_effect=lambda t: called.append(t)):
-            monitor._prompt_audit()
-        assert called == ["open_secauditor"]
-
-    def test_esc_cancels_audit_prompt(self, monitor):
-        monitor.stdscr.getmaxyx.return_value = (40, 120)
-        monitor.stdscr.getch.side_effect = [27]
-        with patch("curses.color_pair", side_effect=lambda n: n << 8), \
-             patch.object(monitor, "_put"), \
-             patch.object(monitor, "_dispatch_audit_bridge") as tog:
-            monitor._prompt_audit()
-        tog.assert_not_called()
-
+    pass
 
 class TestPromptForensicTopEntry:
     def test_enter_runs_inspect(self, monitor):
@@ -256,35 +217,9 @@ class TestDispatchKeyscanErrorPaths:
         monitor._log_max = 100
         return monitor
 
-    def test_kill_process_not_found(self, monitor):
-        self._ready(monitor)
-        with patch("os.kill", side_effect=ProcessLookupError):
-            ok, msg = monitor._dispatch_keyscan_action(
-                {"type": "kill_process", "pid": 99999})
-        assert ok is False
-        assert "not found" in msg
 
-    def test_kill_process_permission_denied(self, monitor):
-        self._ready(monitor)
-        with patch("os.kill", side_effect=PermissionError):
-            ok, msg = monitor._dispatch_keyscan_action(
-                {"type": "kill_process", "pid": 1})
-        assert ok is False
-        assert "permission" in msg
 
-    def test_kill_process_os_error(self, monitor):
-        self._ready(monitor)
-        with patch("os.kill", side_effect=OSError("boom")):
-            ok, msg = monitor._dispatch_keyscan_action(
-                {"type": "kill_process", "pid": 1})
-        assert ok is False
-        assert "boom" in msg
 
-    def test_unknown_action_type(self, monitor):
-        self._ready(monitor)
-        ok, msg = monitor._dispatch_keyscan_action({"type": "unknown"})
-        assert ok is False
-        assert "unknown" in msg
 
 
 # ── Log messages panel (toggle + scroll) ──────────────────────────────────
@@ -324,20 +259,6 @@ class TestChatToggle:
 
 
 # ── UI: toggle-close paths when re-pressing the same audit type ──────────
-
-
-class TestAuditReToggle:
-    def test_same_type_closes_audit(self, monitor):
-        # First open, then re-press same key — closes.
-        with patch.object(monitor, "_start_audit"):
-            monitor._toggle_audit_mode("network")
-        assert monitor._audit_mode is True
-        # Reopen same type — simulate closing
-        monitor._toggle_audit_mode("network")
-        assert monitor._audit_mode is False
-
-
-# ── Small helper coverage: _wrap_text via action panel ───────────────────
 
 
 class TestWrapText:

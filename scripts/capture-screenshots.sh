@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+# capture-screenshots.sh — drive the TUI through every screen in a real
+# Terminal.app window and write one PNG per surface into screenshots/.
+#
+# Pattern lifted from the legacy procmon repo: osascript launches and
+# drives Terminal, screencapture -R writes a region PNG. The Terminal
+# window is positioned at known bounds so screencapture and osascript
+# agree on coordinates.
+#
+# Pass `--root` to launch via the sudo wrapper (full capabilities).
+# Default is unprivileged. Re-run as needed; each invocation overwrites
+# the captured PNGs.
+#
+# This script will pop up Terminal.app and steal focus for the duration.
+# Don't touch the keyboard while it runs.
+
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SHOTS="$ROOT_DIR/screenshots"
+mkdir -p "$SHOTS"
+
+USE_SUDO=0
+if [ "${1:-}" = "--root" ]; then
+  USE_SUDO=1
+fi
+
+# Window geometry in screen points (top-left origin). Wide enough to
+# show every TUI column without wrap, tall enough for menus and detail
+# panels.
+X1=80
+Y1=80
+X2=1480
+Y2=1000
+W=$(( X2 - X1 ))
+H=$(( Y2 - Y1 ))
+
+if [ "$USE_SUDO" -eq 1 ]; then
+  TUI_CMD="sudo -n /usr/local/sbin/mac-tui-procmon-sudo --skip-preflight"
+else
+  TUI_CMD="/opt/homebrew/bin/python3 $ROOT_DIR/mac_tui_procmon.py --skip-preflight"
+fi
+
+osa_run() {
+  /usr/bin/osascript -e "$1"
+}
+
+press() {
+  # press <key-spec> [settle-secs]
+  # key-spec is the literal text or a special name we map below.
+  local key="$1"
+  local settle="${2:-0.6}"
+  case "$key" in
+    Escape)  osa_run 'tell application "System Events" to key code 53' ;;
+    Return)  osa_run 'tell application "System Events" to key code 36' ;;
+    Tab)     osa_run 'tell application "System Events" to key code 48' ;;
+    Up)      osa_run 'tell application "System Events" to key code 126' ;;
+    Down)    osa_run 'tell application "System Events" to key code 125' ;;
+    Left)    osa_run 'tell application "System Events" to key code 123' ;;
+    Right)   osa_run 'tell application "System Events" to key code 124' ;;
+    *)
+      # Single-character keystroke. Quote-escape for AppleScript.
+      local esc="${key//\\/\\\\}"
+      esc="${esc//\"/\\\"}"
+      osa_run "tell application \"System Events\" to keystroke \"$esc\""
+      ;;
+  esac
+  /bin/sleep "$settle"
+}
+
+shot() {
+  local name="$1"
+  /usr/sbin/screencapture -R "$X1,$Y1,$W,$H" -t png -x "$SHOTS/$name.png"
+  /bin/echo "  captured $SHOTS/$name.png"
+}
+
+# Open Terminal with the TUI, position the window deterministically.
+echo "Launching Terminal.app and the TUI…"
+/usr/bin/osascript <<OSA
+tell application "Terminal"
+  activate
+  do script "cd \"$ROOT_DIR\" && clear && TERM=xterm-256color $TUI_CMD"
+  delay 1
+  set bounds of front window to {$X1, $Y1, $X2, $Y2}
+end tell
+OSA
+/bin/sleep 4   # let preflight + first refresh settle
+
+# Bring Terminal forward before sending keystrokes.
+osa_run 'tell application "Terminal" to activate'
+/bin/sleep 0.5
+
+# ── Main list ──────────────────────────────────────────────────────────
+shot "general-view"
+
+# ── Sort dialog ────────────────────────────────────────────────────────
+press "s" 1.0
+shot "sort-dialog"
+press "Escape" 0.6
+
+# ── Vendor grouping toggle ─────────────────────────────────────────────
+press "g" 1.0
+shot "vendor-grouping"
+press "g" 0.6   # toggle off
+
+# ── Dynamic sort indicator ─────────────────────────────────────────────
+press "d" 0.8
+shot "dynamic-sort"
+press "d" 0.4   # toggle off
+
+# ── Alpha sort variant ─────────────────────────────────────────────────
+press "A" 0.8
+shot "alpha-sort"
+
+# ── Filter dialog ──────────────────────────────────────────────────────
+press "f" 1.0
+shot "process-filter"
+press "Escape" 0.6
+
+# ── Alert config dialog ────────────────────────────────────────────────
+press "C" 1.0
+shot "alert-config"
+press "Escape" 0.6
+
+# ── Forensic menu ──────────────────────────────────────────────────────
+press "F" 1.0
+shot "forensic-menu"
+press "Escape" 0.6
+
+# ── Telemetry menu ─────────────────────────────────────────────────────
+press "E" 1.0
+shot "telemetry-menu"
+press "Escape" 0.6
+
+# ── Log overlay ────────────────────────────────────────────────────────
+press "L" 1.0
+shot "log-overlay"
+press "L" 0.4
+
+# ── Inspect mode (codesign/yara takes ~3s) ─────────────────────────────
+press "I" 4.0
+shot "inspect-view"
+press "Escape" 0.8
+
+# ── Process triage (osquery + injection scan, ~5s) ─────────────────────
+press "T" 6.0
+shot "triage-view"
+press "Escape" 0.8
+
+# ── Network mode ───────────────────────────────────────────────────────
+press "N" 2.0
+shot "network-view"
+press "Escape" 0.8
+
+# ── Quit ───────────────────────────────────────────────────────────────
+press "q" 0.5
+
+echo "Done. Screenshots written to $SHOTS"
+echo "Captured surfaces:"
+ls -1 "$SHOTS" | sort
