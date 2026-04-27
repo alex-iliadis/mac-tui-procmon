@@ -3831,15 +3831,7 @@ class ProcMonUI:
                     detail_all_lines = summary + detail_all_lines
                 detail_all_lines = panel + detail_all_lines
             elif self._audit_loading:
-                title_map = {"network": "network exposure",
-                             "dns": "DNS / proxy / MDM",
-                             "persistence": "persistence",
-                             "process_triage": "deep host triage",
-                             "automated_security_scan": "automated security scan",
-                             "tool_correlation": "external tool correlation"}
-                detail_all_lines = [
-                    f" Running {title_map.get(self._audit_type, self._audit_type or 'audit')} audit\u2026"
-                ]
+                detail_all_lines = [" Running deep process triage\u2026"]
                 progress_lines = self._audit_progress_view()
                 if progress_lines:
                     detail_all_lines.extend([""] + progress_lines)
@@ -5511,49 +5503,12 @@ class ProcMonUI:
             return
         if self._audit_type not in self._AUDIT_SCANS:
             return
-        scan_fn, _ = self._AUDIT_SCANS[self._audit_type]
         self._audit_loading = True
         self._audit_pending = None
 
         def _worker():
             try:
-                if self._audit_type == "automated_security_scan":
-                    lines = self._format_automated_security_scan_report()
-                    self._audit_pending = lines
-                    return
-                if (getattr(self, "_test_mode", False)
-                        and self._audit_type == "global_score"):
-                    findings = [{
-                        "severity": "INFO",
-                        "message": ("Test mode global score placeholder. "
-                                    "Component audits are validated "
-                                    "individually by the TUI harness."),
-                        "action": None,
-                    }]
-                elif (getattr(self, "_test_mode", False)
-                        and self._audit_type == "injection_antidebug"):
-                    findings = [{
-                        "severity": "HIGH",
-                        "message": "Test mode injection/anti-debug placeholder: live DYLD injection detected",
-                        "evidence": ("pid: 4242\n"
-                                     "signal: DYLD_INSERT_LIBRARIES=/tmp/libinject.dylib\n"
-                                     "source: TUI harness placeholder"),
-                        "action": None,
-                    }]
-                elif (getattr(self, "_test_mode", False)
-                        and self._audit_type == "tool_correlation"):
-                    findings = [{
-                        "severity": "HIGH",
-                        "message": "Test mode optional-backend placeholder: Santa + osquery + runtime scan corroborate suspicious execution",
-                        "evidence": ("KnockKnock flagged=1 persistent=3\n"
-                                     "BlockBlock alerts=2 blocked=1\n"
-                                     "Santa running mode=MONITOR\n"
-                                     "osquery processes=3 on_disk0=1\n"
-                                     "runtime_high=1"),
-                        "action": None,
-                    }]
-                elif (getattr(self, "_test_mode", False)
-                        and self._audit_type == "process_triage"):
+                if getattr(self, "_test_mode", False):
                     findings = [{
                         "severity": "HIGH",
                         "message": "Test mode deep triage placeholder: selected process shows live DYLD injection and user-writable dylibs",
@@ -5563,13 +5518,11 @@ class ProcMonUI:
                                      "user_writable_dylib: /tmp/libinject.dylib"),
                         "action": None,
                     }]
-                elif self._audit_type == "process_triage":
+                else:
                     findings = self._build_process_triage_findings(
                         self._audit_context_pid,
                         self._audit_context_cmd,
                     )
-                else:
-                    findings = scan_fn()
                 lines = self._format_audit_report(findings)
             except Exception as e:
                 lines = [f"[audit error: {e}]"]
@@ -5602,9 +5555,8 @@ class ProcMonUI:
         # best-effort; if Claude isn't installed / times out, the panel
         # just doesn't appear.
         title = self._audit_title()
-        if self._audit_type != "automated_security_scan":
-            self._start_llm_summary(
-                "audit", title, self._audit_findings_structured)
+        self._start_llm_summary(
+            "audit", title, self._audit_findings_structured)
         return True
 
     def _format_audit_report(self, findings):
@@ -9268,16 +9220,8 @@ class ProcMonUI:
             self._toggle_inspect_mode()
         elif payload == "triage":
             self._toggle_process_triage_mode()
-        elif payload == "hidden":
-            self._toggle_hidden_scan_mode()
-        elif payload == "bulk":
-            self._toggle_bulk_scan_mode()
         elif payload == "network":
             self._toggle_net_mode()
-        elif isinstance(payload, str) and payload.startswith("audit:"):
-            # Some process-investigation entries reuse the audit runtime
-            # because they already render structured findings/remediations.
-            self._toggle_audit_mode(payload[len("audit:"):])
 
     def _dispatch_telemetry_action(self, payload):
         """Handle a selection from the Live Telemetry menu."""
