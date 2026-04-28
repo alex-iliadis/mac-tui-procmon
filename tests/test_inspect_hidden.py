@@ -1651,6 +1651,69 @@ class TestChatFallbackChain:
         assert statuses[2] == "[trying with gemini…]"
         assert monitor._chat_pending == "gemini answer"
 
+    def test_argv_de_elevates_under_sudo(self, monitor):
+        """Under sudo (EUID=0 with SUDO_USER set) each assistant CLI is
+        wrapped with `sudo -n -E -u $SUDO_USER --` so it runs as the
+        invoking user. This is the actual fix for claude's keychain hang
+        — running it as the user means claude can read its OAuth tokens
+        normally."""
+        monitor._chat_mode = True
+        monitor._chat_input = "q"
+        monitor._chat_cursor = 1
+
+        fake = self._make_proc(stdout=b"answer", returncode=0)
+        with patch.dict("os.environ", {"SUDO_USER": "alex"}, clear=False), \
+             patch("os.geteuid", return_value=0), \
+             patch("subprocess.Popen", return_value=fake) as popen, \
+             patch("threading.Thread",
+                   side_effect=self._immediate_thread):
+            monitor._chat_send()
+
+        actual_argv = popen.call_args_list[0][0][0]
+        assert actual_argv[:6] == ["sudo", "-n", "-E", "-u", "alex", "--"]
+        # The original CLI follows the wrapper.
+        assert actual_argv[6] == "claude"
+
+    def test_argv_not_wrapped_when_not_root(self, monitor):
+        """When procmon runs as a normal user, no `sudo -u` wrapper is
+        added — the assistant CLI is invoked directly."""
+        monitor._chat_mode = True
+        monitor._chat_input = "q"
+        monitor._chat_cursor = 1
+
+        fake = self._make_proc(stdout=b"answer", returncode=0)
+        with patch("os.geteuid", return_value=501), \
+             patch("subprocess.Popen", return_value=fake) as popen, \
+             patch("threading.Thread",
+                   side_effect=self._immediate_thread):
+            monitor._chat_send()
+
+        actual_argv = popen.call_args_list[0][0][0]
+        assert actual_argv[0] == "claude"
+        assert "sudo" not in actual_argv[:3]
+
+    def test_argv_not_wrapped_when_no_sudo_user(self, monitor):
+        """Even at EUID=0, if SUDO_USER isn't set (e.g. true root login,
+        not a sudo invocation) we can't infer who to drop to, so we run
+        the CLI directly as root and let it fail loudly."""
+        monitor._chat_mode = True
+        monitor._chat_input = "q"
+        monitor._chat_cursor = 1
+
+        fake = self._make_proc(stdout=b"answer", returncode=0)
+        env_no_sudo = {k: v for k, v in os.environ.items()
+                       if k != "SUDO_USER"}
+        with patch.dict("os.environ", env_no_sudo, clear=True), \
+             patch("os.geteuid", return_value=0), \
+             patch("subprocess.Popen", return_value=fake) as popen, \
+             patch("threading.Thread",
+                   side_effect=self._immediate_thread):
+            monitor._chat_send()
+
+        actual_argv = popen.call_args_list[0][0][0]
+        assert actual_argv[0] == "claude"
+        assert "sudo" not in actual_argv[:3]
+
     def test_loading_marker_renders_dynamic_status(self, monitor):
         """The chat overlay loading marker reflects `_chat_status` so the
         user sees the in-flight assistant label, not a hardcoded "claude"."""

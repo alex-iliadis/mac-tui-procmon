@@ -8050,15 +8050,36 @@ class ProcMonUI:
         self._chat_pending = (
             "[all assistants failed]\n" + "\n".join(errors))
 
+    @staticmethod
+    def _wrap_argv_for_invoking_user(argv):
+        """If we're root with SUDO_USER set, wrap argv with
+        `sudo -n -E -u $SUDO_USER --` so the assistant runs as the
+        invoking user.
+
+        Why: claude's OAuth/keychain reads gate on the process UID, not
+        HOME. Even with HOME pointed at the user's home dir, claude
+        running as EUID=0 can't read the per-user keychain and ends up
+        hanging on auth — which is exactly the symptom the user hit.
+        Spawning under the original UID via `sudo -u` sidesteps it. On
+        macOS, root → any-user via sudo doesn't require a password.
+        """
+        if os.geteuid() != 0:
+            return argv
+        sudo_user = os.environ.get("SUDO_USER")
+        if not sudo_user:
+            return argv
+        return ["sudo", "-n", "-E", "-u", sudo_user, "--"] + list(argv)
+
     def _run_assistant_attempt(self, argv, stdin_text, env, timeout, label):
         """Invoke one assistant CLI. Returns (ok, text_or_error_message).
 
         Kept as a method (not a closure) so tests can patch it per-attempt
         to drive the fallback chain deterministically.
         """
+        actual_argv = self._wrap_argv_for_invoking_user(argv)
         try:
             proc = subprocess.Popen(
-                argv,
+                actual_argv,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
