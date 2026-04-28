@@ -35,6 +35,15 @@ Y2=1000
 W=$(( X2 - X1 ))
 H=$(( Y2 - Y1 ))
 
+# Capture region. We deliberately start CAP_Y1 below Y1 to crop out the
+# Terminal title bar — macOS renders user@host, dirname, and dimensions
+# there (e.g. `mac-tui-procmon — alex@laptop — ~/code/... — 194×62`),
+# which leaks both the username and the hostname into public docs.
+# Setting `custom title` only rewrites one segment; the others remain.
+# Cropping ~30pt below the window top removes the entire title bar.
+CAP_Y1=$(( Y1 + 30 ))
+CAP_H=$(( Y2 - CAP_Y1 ))
+
 if [ "$USE_SUDO" -eq 1 ]; then
   TUI_CMD="sudo -n /usr/local/sbin/mac-tui-procmon-sudo --skip-preflight"
 else
@@ -70,11 +79,14 @@ press() {
 
 shot() {
   local name="$1"
-  /usr/sbin/screencapture -R "$X1,$Y1,$W,$H" -t png -x "$SHOTS/$name.png"
+  /usr/sbin/screencapture -R "$X1,$CAP_Y1,$W,$CAP_H" -t png -x "$SHOTS/$name.png"
   /bin/echo "  captured $SHOTS/$name.png"
 }
 
 # Open Terminal with the TUI, position the window deterministically.
+# `set custom title` overrides the default "<dir> — <cmd>" rendering so
+# the Terminal title bar in the captured PNGs doesn't leak the absolute
+# path (e.g. `/Users/<name>/code/...`) into public docs.
 echo "Launching Terminal.app and the TUI…"
 /usr/bin/osascript <<OSA
 tell application "Terminal"
@@ -82,6 +94,7 @@ tell application "Terminal"
   do script "cd \"$ROOT_DIR\" && clear && TERM=xterm-256color $TUI_CMD"
   delay 1
   set bounds of front window to {$X1, $Y1, $X2, $Y2}
+  set custom title of selected tab of front window to "mac-tui-procmon"
 end tell
 OSA
 /bin/sleep 4   # let preflight + first refresh settle
@@ -137,19 +150,34 @@ press "L" 1.0
 shot "log-overlay"
 press "L" 0.4
 
-# ── Inspect mode (codesign/yara takes ~3s) ─────────────────────────────
-press "I" 4.0
+# ── Inspect mode (codesign + on-disk YARA + Apple-signed inference;
+# on a real Chrome binary this can take 15–25s end-to-end). Wait long
+# enough to capture the populated panel, not the "Collecting forensic
+# artifacts…" loading state.
+press "I" 28.0
 shot "inspect-view"
 press "Escape" 0.8
 
-# ── Process triage (osquery + injection scan, ~5s) ─────────────────────
-press "T" 6.0
+# ── Process triage (osquery snapshot + injection/anti-debug scan;
+# similar 20–30s window). ─────────────────────────────────────────────
+press "T" 32.0
 shot "triage-view"
 press "Escape" 0.8
 
-# ── Network mode ───────────────────────────────────────────────────────
-press "N" 2.0
-shot "network-view"
+# Network connections panel deliberately NOT captured: the panel shows
+# remote endpoints with vendor/geolocation labels (e.g. [Athens/GR],
+# [San Francisco/CA]). The CDN edge is correlated with the user's
+# country, so the screenshot is a country leak. Users see the live
+# panel themselves; it doesn't need to ship as a public PNG.
+
+# ── Ask Claude overlay ─────────────────────────────────────────────────
+# Open the chat overlay and snap immediately, before the assistant has
+# finished thinking — the loading marker is the most representative
+# state ("[claude thinking…]" / "[trying with codex…]") and avoids
+# capturing whatever assistant output happens to come back, which can
+# itself echo identifying details.
+press "?" 1.5
+shot "ask-claude"
 press "Escape" 0.8
 
 # ── Quit ───────────────────────────────────────────────────────────────

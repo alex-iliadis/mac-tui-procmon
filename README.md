@@ -93,8 +93,6 @@ single row showing the member count
 The default tree groups children under their parent. `←` collapses,
 `→` expands a subtree.
 
-![Process Group View](screenshots/process-group-view.png)
-
 ### Sort Dialog
 
 Press `s` for a menu of every sort mode in case you can't remember
@@ -164,8 +162,6 @@ The same view shows entitlement abuse signals when present — for
 example, dangerous combos on a non-Apple binary or runtime paths
 under user-writable trees.
 
-![Process Entitlements](screenshots/process-entitlements.png)
-
 ### Deep Process Triage
 
 `T` runs a deeper triage pass: inspect artifacts plus an osquery
@@ -189,8 +185,6 @@ endpoint owned by the selected process via `lsof`/`nettop`, with:
 - GeoIP city / country and abbreviated org tag (`[AWS]`,
   `[Cloudflare]`, …)
 - Per-flow cumulative bytes in/out
-
-![Network View](screenshots/network-view.png)
 
 Press `k` on a highlighted row to kill **just that connection**
 without killing the process. Press `N` again or `Esc` to close.
@@ -219,8 +213,6 @@ MAC_TUI_PROCMON_ES_SELECT_PREFIXES=/usr/sbin/sshd:/usr/bin/sudo \
 ```
 
 The active scope shows in the timeline header.
-
-![Security Timeline](screenshots/live-event-stream.png)
 
 `c` clears the buffer. **First Esc** stops the stream and triggers
 an LLM summary of everything captured. **Second Esc** closes the
@@ -308,8 +300,6 @@ persist to `~/.mac-tui-procmon.json`.
 The alert counter resets only after every value stays below
 threshold for a full interval — that keeps an oscillating value
 from re-arming the audible alert forever.
-
-![Config View](screenshots/config-view.png)
 
 Dynamic sort (`d`) uses these same thresholds: anything currently
 exceeding floats above everything else.
