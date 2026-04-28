@@ -36,8 +36,8 @@ Every key the TUI binds, by mode.
 
 ## Detail focus — common keys
 
-These work in every detail mode (Inspect, Hidden scan, Audit, Bulk
-scan, Events, Traffic, Network):
+These work in every detail mode (Inspect, Audit, Events, Traffic,
+Network):
 
 | Key            | Action                            |
 |----------------|-----------------------------------|
@@ -53,25 +53,12 @@ scan, Events, Traffic, Network):
 |-----|-------------------------|
 | `I` | Toggle inspect mode off |
 
-## Hidden-scan mode
-
-| Key | Action                      |
-|-----|-----------------------------|
-| `H` | Toggle hidden-scan mode off |
-
 ## Audit mode (used by Deep Process Triage)
 
 | Key       | Action                                                  |
 |-----------|---------------------------------------------------------|
 | `↑` / `↓` | Move structured cursor (or scroll if no findings)       |
 | `R` / `r` | Re-run the triage                                       |
-
-## Bulk-scan mode
-
-| Key | Action                          |
-|-----|---------------------------------|
-| `F` | Toggle bulk-scan off            |
-| `Esc` | Cancel running scan and close |
 
 ## Events mode (Endpoint Security stream)
 

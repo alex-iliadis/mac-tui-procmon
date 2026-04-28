@@ -44,10 +44,6 @@ Every user-facing feature in `mac-tui-procmon`, grouped by what it does.
 - **Deep process triage (`T`)** — adds osquery telemetry,
   injection / anti-debug evidence, binary trust profile, and a
   structured finding list with cursor navigation.
-- **Hidden-process scan** — diffs `libproc` listing against
-  `sysctl`/`ps` to surface processes hidden from one of them.
-- **Bulk scan (`F` → Bulk)** — runs the inspect pipeline across
-  every visible process and aggregates findings.
 
 ## Per-process network
 
@@ -86,8 +82,18 @@ Every user-facing feature in `mac-tui-procmon`, grouped by what it does.
   conversation's system prompt, so follow-ups stay tied to what's
   visible — process triage, inspect, network view, events stream,
   whatever you were looking at.
-- **Multi-provider:** Claude, Codex, Gemini are all supported; the
-  app picks based on available credentials.
+- **Fallback chain:** the overlay tries `claude` first; on
+  timeout / failure it auto-falls-back to `codex`, then `gemini`.
+  The status line in the prompt updates as the chain advances
+  (`[claude thinking…]` → `[trying with codex…]` → `[trying with
+  gemini…]`) so you always know which assistant is working. Per-CLI
+  timeout defaults to 60s; override with
+  `MAC_TUI_PROCMON_CHAT_TIMEOUT`.
+- **De-elevates under sudo.** When procmon runs as root with
+  `SUDO_USER` set, each assistant subprocess is wrapped with `sudo
+  -n -E -u $SUDO_USER --` so the CLI runs as the invoking user. This
+  matters for `claude`, whose OAuth/keychain reads gate on process
+  UID — running it as root makes it hang on auth.
 
 ## Debug log
 
@@ -107,8 +113,7 @@ Every user-facing feature in `mac-tui-procmon`, grouped by what it does.
   `MAC_TUI_PROCMON_CAPTURE_DIR` env var is set — the regression
   tests use this to assert rendered text without depending on a
   real terminal.
-- **Semantic screen / report assertions** in
-  `tui_screen_assertions.py` and `tui_report_assertions.py` so
+- **Semantic screen assertions** in `tui_screen_assertions.py` so
   tests describe screen content (not pixels).
 - **Coverage:** 5770 statements in the core impl module, 75%
-  covered by 1036 tests.
+  covered by 945 tests.

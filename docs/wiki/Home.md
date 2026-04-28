@@ -33,9 +33,6 @@ headless audit reports) lives in the sister project
     YARA on disk, YARA on memory (root), binary trust profile.
   - Deep triage (`T`): adds osquery snapshot, injection /
     anti-debug evidence, structured cursor over findings.
-  - Hidden process scan: diff `libproc` against `sysctl`/`ps`.
-  - Bulk scan (`F` → Bulk): inspect every visible process and
-    aggregate findings.
 - Per-process network connection list with one-key kill (`k`).
 - Endpoint Security live event stream (exec, auth, login, TCC,
   XProtect) with a two-stage Esc that synthesizes an LLM summary
@@ -58,7 +55,7 @@ headless audit reports) lives in the sister project
 | Live process tree                       | Kernel / boot / SIP / SSV posture      |
 | Per-process metrics & forensics         | TCC, keychain, auth stack              |
 | Per-process network connections         | Persistence, browser extensions        |
-| Inspect / triage / hidden / bulk        | CVE intelligence                       |
+| Inspect / triage                        | CVE intelligence                       |
 | Endpoint Security stream (process)      | Full security score + remediation      |
 | Traffic Inspector (per-process)         | Headless audit reports + AI synthesis  |
 | Alert engine                            | Quarantine / hooks-removal             |

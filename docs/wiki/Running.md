@@ -12,9 +12,9 @@ sudo -n /usr/local/sbin/mac-tui-procmon-sudo --skip-preflight
 
 ## Sudo wrapper
 
-Some features need root: memory-region YARA inside Inspect, the
-hidden-process kqueue scan, and `eslogger` for the Endpoint
-Security stream. The wrapper at `scripts/mac-tui-procmon-sudo` is
+Some features need root: memory-region YARA inside Inspect and
+`eslogger` for the Endpoint Security stream. The wrapper at
+`scripts/mac-tui-procmon-sudo` is
 the canonical privileged entry point — it preserves the caller's
 PATH / HOME so user-installed CLIs (eslogger, osquery, mitmdump,
 yara, codesign-checker, …) resolve under sudo the same way they do
@@ -66,7 +66,7 @@ python3 -m mac_system_security capture-baseline
 
 | Variable                                  | Effect                                   |
 |-------------------------------------------|------------------------------------------|
-| `MAC_TUI_PROCMON_CHAT_TIMEOUT`            | Chat-overlay LLM timeout (seconds)       |
+| `MAC_TUI_PROCMON_CHAT_TIMEOUT`            | Per-CLI chat timeout in seconds (default 60, min 15) — applies to each step in the claude → codex → gemini fallback chain |
 | `MAC_TUI_PROCMON_TEST_MODE`               | Skip background workers (test fixtures)  |
 | `MAC_TUI_PROCMON_CAPTURE_DIR`             | Directory for `*.screen.json` snapshots  |
 | `MAC_TUI_PROCMON_CAPTURE_ACTION`          | Snapshot-file basename                   |

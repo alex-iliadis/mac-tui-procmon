@@ -239,9 +239,9 @@ process. `c` clears flows; `Esc` stops the shim and closes.
 
 Press `?` from anywhere — main list, inspect, triage, network view,
 live events, log overlay, anywhere. The overlay captures the
-current screen as the system prompt, asks Claude an immediate
-"Tell me more about this item." question, then stays open for
-multi-turn follow-ups.
+current screen as the system prompt, asks the assistant an
+immediate "Tell me more about this item." question, then stays
+open for multi-turn follow-ups.
 
 The embedded session can inspect the host directly: read files, run
 investigation commands, verify a binary signature, walk a path
@@ -254,6 +254,19 @@ shown in the detail pane. That makes it useful for:
 - following up to narrow in on benign vs. expected vs. suspicious
 
 ![Ask Claude](screenshots/ask-claude.png)
+
+**Fallback chain.** The overlay tries `claude` first; on timeout or
+failure it auto-falls-back to `codex`, then `gemini`. The status
+line in the prompt updates as the chain advances (`[claude
+thinking…]` → `[trying with codex…]` → `[trying with gemini…]`) so
+you always know which assistant is working. Per-CLI timeout is 60s
+(override via `MAC_TUI_PROCMON_CHAT_TIMEOUT`).
+
+**De-elevation under sudo.** When procmon runs as root, each
+assistant subprocess is wrapped with `sudo -n -E -u $SUDO_USER --`
+so the CLI executes as the invoking user. This is required for
+`claude`, whose OAuth/keychain reads gate on process UID — running
+it as root makes it hang on auth.
 
 Inspect runs Claude + Codex + Gemini in parallel and synthesizes a
 consensus report (`CONSENSUS_RISK`, `AGREEMENT`,
@@ -305,10 +318,10 @@ exceeding floats above everything else.
 
 ## Sudo Wrapper
 
-Some features need root: memory-region YARA inside Inspect, the
-hidden-process kqueue scan, `eslogger` for the Endpoint Security
-stream. The wrapper at `scripts/mac-tui-procmon-sudo` is the
-canonical privileged entry point — it preserves the caller's PATH /
+Some features need root: memory-region YARA inside Inspect and
+`eslogger` for the Endpoint Security stream. The wrapper at
+`scripts/mac-tui-procmon-sudo` is the canonical privileged entry
+point — it preserves the caller's PATH /
 HOME so user-installed CLIs (eslogger, osquery, mitmdump, yara,
 codesign-checker, …) resolve under sudo the same way they do
 without it.
@@ -366,7 +379,7 @@ youruser ALL=(root) NOPASSWD: /usr/local/sbin/mac-tui-procmon-sudo *
 | `Esc`           | Close current special mode (or quit if none open)     |
 | `q`             | Quit                                                  |
 
-### Detail focus (Inspect / Hidden / Audit / Bulk / Events / Traffic / Network)
+### Detail focus (Inspect / Audit / Events / Traffic / Network)
 
 | Key             | Action                       |
 |-----------------|------------------------------|
@@ -379,9 +392,7 @@ youruser ALL=(root) NOPASSWD: /usr/local/sbin/mac-tui-procmon-sudo *
 Mode-specific extras:
 
 - **Inspect** — `I` toggles off.
-- **Hidden scan** — `H` toggles off.
 - **Audit / Triage** — `R`/`r` re-run, structured cursor over findings.
-- **Bulk scan** — `F` toggles off; `Esc` cancels a running scan.
 - **Events** — `c` clears; first Esc stops + LLM summary, second Esc closes.
 - **Traffic** — `c` clears flows; Esc/q stop the mitmdump shim.
 - **Network** — `k` kills the highlighted connection; `N` closes.
@@ -488,7 +499,7 @@ External tools:
     --cov-report=term-missing
 ```
 
-Local: **1036 passed**, 75% coverage on `mac_tui_procmon_impl.py`
+Local: **945 passed**, 75% coverage on `mac_tui_procmon_impl.py`
 (5,770 statements). The 100% number on the public shim is an
 artifact of measuring the re-export module — see
 [Testing](docs/wiki/Testing.md) for the full breakdown.
@@ -504,3 +515,10 @@ artifact of measuring the re-export module — see
 - [Running](docs/wiki/Running.md)
 - [Testing](docs/wiki/Testing.md)
 - [Screenshots](docs/wiki/Screenshots.md)
+
+---
+
+## License
+
+[GNU AGPL v3.0](LICENSE). Network-deployed modifications must publish
+their source under the same terms.

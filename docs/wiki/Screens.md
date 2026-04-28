@@ -52,16 +52,6 @@ a structured cursor over remediable findings.
 List of TCP/UDP endpoints owned by the selected process: state,
 local, remote, foreign DNS. `k` kills the highlighted connection.
 
-## Hidden-process scan
-
-Diff of `libproc` against `sysctl` / `ps`. Surfaces processes
-visible to one but not the other.
-
-## Bulk scan
-
-Runs the inspect pipeline across every visible process. Findings
-aggregate; live progress at the top; Esc cancels.
-
 ## Endpoint Security stream (`E` → Security timeline)
 
 Live `eslogger` events: exec, auth, login-window, TCC, XProtect.
@@ -90,3 +80,13 @@ render writes a `<surface>.screen.json` artifact: dimensions,
 visible lines, focused box. Used by regression tests in
 `tests/test_tui_screen_capture.py` and
 `tests/test_tui_screen_assertions.py`.
+
+## AI chat overlay — fallback chain
+
+When you press `?`, the overlay tries the locally-installed
+assistants in order: `claude` → `codex` → `gemini`. The status line
+in the prompt updates as the chain advances so you always know which
+assistant is working. Under `sudo`, each subprocess is wrapped with
+`sudo -n -E -u $SUDO_USER --` to drop back to the invoking user — a
+necessary trick for `claude`, whose keychain reads gate on process
+UID rather than `$HOME`.
