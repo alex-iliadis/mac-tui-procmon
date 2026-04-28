@@ -1,14 +1,23 @@
+<div align="center">
+
 # mac-tui-procmon
 
-> Terminal UI process monitor for macOS. Built on direct `libproc` /
-> `sysctl` calls — no `fork()` per refresh — so it survives fork bombs
-> and memory exhaustion that knock other monitors offline.
+**Terminal UI process monitor for macOS — survives fork bombs and memory exhaustion via direct `libproc` / `sysctl` calls.**
 
-Process-monitoring only. Host-wide security posture (TCC sweeps,
-kernel/boot, persistence, browser extensions, CVE intelligence,
-full security scoring, remediation workflows, headless audit
-reports) lives in the sister project
-[`mac-system-security`](https://github.com/alex-iliadis/mac-system-security).
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](LICENSE)
+![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue)
+![macOS 13+](https://img.shields.io/badge/macOS-13%2B-lightgrey)
+![Tests 945 passing](https://img.shields.io/badge/tests-945%20passing-brightgreen)
+![Coverage 75%](https://img.shields.io/badge/coverage-75%25-brightgreen)
+
+</div>
+
+<p align="center">
+  <img src="screenshots/general-view.png" alt="mac-tui-procmon main view">
+</p>
+
+> [!NOTE]
+> **Process-monitoring only.** Host-wide security posture — TCC, kernel/boot, persistence, browser extensions, CVE intelligence, full security scoring, remediation workflows, headless audit reports — lives in the sister project [`mac-system-security`](https://github.com/alex-iliadis/mac-system-security).
 
 ---
 
@@ -247,18 +256,11 @@ shown in the detail pane. That makes it useful for:
 
 ![Ask Claude](screenshots/ask-claude.png)
 
-**Fallback chain.** The overlay tries `claude` first; on timeout or
-failure it auto-falls-back to `codex`, then `gemini`. The status
-line in the prompt updates as the chain advances (`[claude
-thinking…]` → `[trying with codex…]` → `[trying with gemini…]`) so
-you always know which assistant is working. Per-CLI timeout is 60s
-(override via `MAC_TUI_PROCMON_CHAT_TIMEOUT`).
+> [!TIP]
+> **Fallback chain.** The overlay tries `claude` first; on timeout or failure it auto-falls-back to `codex`, then `gemini`. The status line in the prompt updates as the chain advances (`[claude thinking…]` → `[trying with codex…]` → `[trying with gemini…]`) so you always know which assistant is working. Per-CLI timeout is 60s (override via `MAC_TUI_PROCMON_CHAT_TIMEOUT`).
 
-**De-elevation under sudo.** When procmon runs as root, each
-assistant subprocess is wrapped with `sudo -n -E -u $SUDO_USER --`
-so the CLI executes as the invoking user. This is required for
-`claude`, whose OAuth/keychain reads gate on process UID — running
-it as root makes it hang on auth.
+> [!WARNING]
+> **De-elevation under sudo.** When procmon runs as root, each assistant subprocess is wrapped with `sudo -n -E -u $SUDO_USER --` so the CLI executes as the invoking user. This is required for `claude`, whose OAuth/keychain reads gate on process UID — running it as root makes it hang on auth.
 
 Inspect runs Claude + Codex + Gemini in parallel and synthesizes a
 consensus report (`CONSENSUS_RISK`, `AGREEMENT`,
@@ -308,13 +310,8 @@ exceeding floats above everything else.
 
 ## Sudo Wrapper
 
-Some features need root: memory-region YARA inside Inspect and
-`eslogger` for the Endpoint Security stream. The wrapper at
-`scripts/mac-tui-procmon-sudo` is the canonical privileged entry
-point — it preserves the caller's PATH /
-HOME so user-installed CLIs (eslogger, osquery, mitmdump, yara,
-codesign-checker, …) resolve under sudo the same way they do
-without it.
+> [!IMPORTANT]
+> Some features need root — memory-region YARA inside Inspect and `eslogger` for the Endpoint Security stream. The wrapper at `scripts/mac-tui-procmon-sudo` is the canonical privileged entry point. It preserves the caller's `PATH` and `HOME` so user-installed CLIs (`eslogger`, `osquery`, `mitmdump`, `yara`, `codesign-checker`, …) resolve under sudo the same way they do without it.
 
 Install once:
 
