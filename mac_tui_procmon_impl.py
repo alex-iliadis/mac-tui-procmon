@@ -1498,7 +1498,7 @@ def _effective_home():
 # Cached at module load; process restart picks up new sudo state.
 _EFFECTIVE_HOME = _effective_home()
 _CHAT_TIMEOUT_SECS = max(
-    30, int(os.environ.get("MAC_TUI_PROCMON_CHAT_TIMEOUT", "90"))
+    15, int(os.environ.get("MAC_TUI_PROCMON_CHAT_TIMEOUT", "60"))
 )
 
 
@@ -2966,6 +2966,7 @@ class ProcMonUI:
         self._chat_loading = False
         self._chat_worker = None
         self._chat_pending = None      # response text from the background thread
+        self._chat_status = None       # in-flight status line ("[claude thinking…]", "[trying with codex…]")
         self._chat_context_label = ""  # shown in the chat title
         self._chat_context_text = ""   # full context string fed into the prompt
         # LLM-generated executive summaries rendered above each finding list.
@@ -7957,93 +7958,139 @@ class ProcMonUI:
 
         def _worker():
             try:
-                system_prompt = (
-                    "You are a macOS security and process-analysis assistant "
-                    "embedded in mac-tui-procmon, a Security Process Monitor. Answer the "
-                    "user's question concisely and grounded in the context "
-                    "they're looking at. Prefer bullet-point answers for "
-                    "anything longer than two sentences. If the user asks "
-                    "about a process / scan output / network connections, "
-                    "reason specifically about what's in the context — don't "
-                    "give generic advice. Start with the visible context and "
-                    "answer immediately when that is enough. You have "
-                    "permission to inspect the local machine directly, "
-                    "including files and commands outside the current project "
-                    "directory, but only do extra investigation when the "
-                    "screen context is insufficient or the user explicitly "
-                    "asks you to dig deeper. When host inspection helps, do "
-                    "it yourself; do not ask the user to run routine "
-                    "read-only inspection commands for you."
-                )
-                if auto_open:
-                    system_prompt += (
-                        " This is the automatic opener triggered by the '?' "
-                        "shortcut. For this first automatic reply, explain "
-                        "the current item using only the on-screen context. "
-                        "Do not inspect the host or run commands unless the "
-                        "user explicitly asks you to dig deeper in a "
-                        "follow-up."
-                    )
-                body = [f"=== CONTEXT ===\n{context}\n"]
-                body.append("=== CONVERSATION ===")
-                for msg in history:
-                    role = "USER" if msg["role"] == "user" else "ASSISTANT"
-                    body.append(f"{role}: {msg['content']}")
-                body.append("ASSISTANT:")
-                stdin_text = "\n".join(body)
-
-                env = {
-                    **os.environ,
-                    "PATH": _USER_TOOL_PATH,
-                    "HOME": _EFFECTIVE_HOME,
-                }
-                sudo_user = os.environ.get("SUDO_USER")
-                if sudo_user:
-                    env["USER"] = sudo_user
-                    env["LOGNAME"] = sudo_user
-
-                proc = subprocess.Popen(
-                    [
-                        "claude",
-                        "-p",
-                        "--no-session-persistence",
-                        "--dangerously-skip-permissions",
-                        "--add-dir",
-                        "/",
-                        system_prompt,
-                    ],
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    env=env,
-                )
-                try:
-                    stdout, stderr = proc.communicate(
-                        input=stdin_text.encode("utf-8"),
-                        timeout=_CHAT_TIMEOUT_SECS)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait()
-                    self._chat_pending = (
-                        f"[claude timed out after {_CHAT_TIMEOUT_SECS}s]"
-                    )
-                    return
-                if proc.returncode != 0:
-                    err = stderr.decode("utf-8", errors="replace").strip()
-                    out = stdout.decode("utf-8", errors="replace").strip()
-                    detail = err or out or "(no output)"
-                    self._chat_pending = f"[claude error rc={proc.returncode}: {detail[:200]}]"
-                    return
-                self._chat_pending = stdout.decode("utf-8", errors="replace").strip()
-            except FileNotFoundError:
-                self._chat_pending = "[claude CLI not found — install: npm install -g @anthropic-ai/claude-code]"
-            except OSError as e:
-                self._chat_pending = f"[claude error: {e}]"
+                self._chat_send_worker(context, history, auto_open)
             except Exception as e:
                 self._chat_pending = f"[unexpected error: {e}]"
 
         self._chat_worker = threading.Thread(target=_worker, daemon=True)
         self._chat_worker.start()
+
+    def _chat_send_worker(self, context, history, auto_open):
+        """Build the prompt and try each assistant CLI in turn until one
+        responds successfully. Updates `self._chat_status` between attempts
+        so the UI shows "claude thinking…" → "trying with codex…" →
+        "trying with gemini…". Final response (or combined error if all
+        three fail) lands in `self._chat_pending` for the main loop's
+        `_poll_chat_result` to render.
+        """
+        system_prompt = (
+            "You are a macOS security and process-analysis assistant "
+            "embedded in mac-tui-procmon, a Security Process Monitor. Answer the "
+            "user's question concisely and grounded in the context "
+            "they're looking at. Prefer bullet-point answers for "
+            "anything longer than two sentences. If the user asks "
+            "about a process / scan output / network connections, "
+            "reason specifically about what's in the context — don't "
+            "give generic advice. Start with the visible context and "
+            "answer immediately when that is enough. You have "
+            "permission to inspect the local machine directly, "
+            "including files and commands outside the current project "
+            "directory, but only do extra investigation when the "
+            "screen context is insufficient or the user explicitly "
+            "asks you to dig deeper. When host inspection helps, do "
+            "it yourself; do not ask the user to run routine "
+            "read-only inspection commands for you."
+        )
+        if auto_open:
+            system_prompt += (
+                " This is the automatic opener triggered by the '?' "
+                "shortcut. For this first automatic reply, explain "
+                "the current item using only the on-screen context. "
+                "Do not inspect the host or run commands unless the "
+                "user explicitly asks you to dig deeper in a "
+                "follow-up."
+            )
+        body = [f"=== CONTEXT ===\n{context}\n"]
+        body.append("=== CONVERSATION ===")
+        for msg in history:
+            role = "USER" if msg["role"] == "user" else "ASSISTANT"
+            body.append(f"{role}: {msg['content']}")
+        body.append("ASSISTANT:")
+        stdin_text = "\n".join(body)
+
+        env = {
+            **os.environ,
+            "PATH": _USER_TOOL_PATH,
+            "HOME": _EFFECTIVE_HOME,
+        }
+        sudo_user = os.environ.get("SUDO_USER")
+        if sudo_user:
+            env["USER"] = sudo_user
+            env["LOGNAME"] = sudo_user
+
+        attempts = [
+            ("claude", [
+                "claude", "-p", "--no-session-persistence",
+                "--dangerously-skip-permissions", "--add-dir", "/",
+                system_prompt,
+            ]),
+            ("codex", [
+                "codex", "exec",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--color", "never", system_prompt,
+            ]),
+            ("gemini", [
+                "gemini", "-p", system_prompt, "-y",
+            ]),
+        ]
+
+        errors = []
+        for i, (label, argv) in enumerate(attempts):
+            if i == 0:
+                self._chat_status = f"[{label} thinking…]"
+            else:
+                self._chat_status = f"[trying with {label}…]"
+            ok, result = self._run_assistant_attempt(
+                argv, stdin_text, env, _CHAT_TIMEOUT_SECS, label)
+            if ok:
+                self._chat_pending = result
+                return
+            errors.append(f"{label}: {result}")
+
+        self._chat_pending = (
+            "[all assistants failed]\n" + "\n".join(errors))
+
+    def _run_assistant_attempt(self, argv, stdin_text, env, timeout, label):
+        """Invoke one assistant CLI. Returns (ok, text_or_error_message).
+
+        Kept as a method (not a closure) so tests can patch it per-attempt
+        to drive the fallback chain deterministically.
+        """
+        try:
+            proc = subprocess.Popen(
+                argv,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+            )
+        except FileNotFoundError:
+            return False, f"{label} CLI not found"
+        except OSError as e:
+            return False, f"{label} error: {e}"
+        except Exception as e:
+            return False, f"{label} unexpected: {e}"
+
+        try:
+            stdout, stderr = proc.communicate(
+                input=stdin_text.encode("utf-8"), timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            return False, f"{label} timed out after {timeout}s"
+        except Exception as e:
+            return False, f"{label} unexpected: {e}"
+
+        if proc.returncode != 0:
+            err = stderr.decode("utf-8", errors="replace").strip()
+            out = stdout.decode("utf-8", errors="replace").strip()
+            detail = err or out or "(no output)"
+            return False, (
+                f"{label} error rc={proc.returncode}: {detail[:200]}")
+        text = stdout.decode("utf-8", errors="replace").strip()
+        if not text:
+            return False, f"{label} returned no output"
+        return True, text
 
     def _poll_chat_result(self):
         """Pick up the worker's result. Returns True when there was a change."""
@@ -8056,11 +8103,13 @@ class ProcMonUI:
                                          "content": self._chat_pending})
             self._chat_pending = None
             self._chat_loading = False
+            self._chat_status = None
             return False
         self._chat_messages.append({"role": "assistant",
                                      "content": self._chat_pending})
         self._chat_pending = None
         self._chat_loading = False
+        self._chat_status = None
         return True
 
     def _handle_chat_input(self, key):
@@ -8263,7 +8312,11 @@ class ProcMonUI:
                   curses.color_pair(14) | curses.A_BOLD)
 
         # Input line (second-from-bottom)
-        loading_marker = " [claude thinking\u2026]" if self._chat_loading else ""
+        if self._chat_loading:
+            loading_marker = f" {self._chat_status}" if self._chat_status \
+                else " [thinking\u2026]"
+        else:
+            loading_marker = ""
         prompt_prefix = "> "
         input_y = box_y + box_h - 2
         input_line = prompt_prefix + self._chat_input + loading_marker

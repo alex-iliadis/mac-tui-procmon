@@ -1351,9 +1351,12 @@ class TestSystemExtensionsEdgeCases:
 
 
 class TestChatSubprocessPaths:
-    """Cover the remaining claude-subprocess error branches in _chat_send."""
+    """Cover assistant-subprocess error branches in `_run_assistant_attempt`
+    and the all-failed combined-error path in `_chat_send_worker`."""
 
-    def test_chat_send_returns_stdout_fallback_on_error_with_empty_stderr(self, monitor):
+    def test_chat_send_combined_error_when_all_assistants_fail(self, monitor):
+        """rc=1 + stdout="rate limited" from every CLI → all three fail and
+        the rate-limited stdout content appears in the combined error."""
         monitor._chat_mode = True
         monitor._chat_input = "q"
         monitor._chat_cursor = 1
@@ -1369,17 +1372,21 @@ class TestChatSubprocessPaths:
         with patch("subprocess.Popen", return_value=fake), \
              patch("threading.Thread", side_effect=immediate_thread):
             monitor._chat_send()
-        # stdout content appears in the error tag
+        assert "all assistants failed" in monitor._chat_pending
         assert "rate limited" in monitor._chat_pending
+        assert "claude" in monitor._chat_pending
+        assert "codex" in monitor._chat_pending
+        assert "gemini" in monitor._chat_pending
 
     def test_chat_send_no_output_at_all(self, monitor):
-        """Empty stdout AND stderr still produces a readable error tag."""
+        """Empty stdout from every CLI is treated as a failed attempt; the
+        combined error mentions "no output" for each."""
         monitor._chat_mode = True
         monitor._chat_input = "q"
         monitor._chat_cursor = 1
         fake = MagicMock()
         fake.communicate.return_value = (b"", b"")
-        fake.returncode = 2
+        fake.returncode = 0
 
         def immediate_thread(target=None, daemon=None, **kw):
             t = MagicMock()
@@ -1390,10 +1397,12 @@ class TestChatSubprocessPaths:
              patch("threading.Thread", side_effect=immediate_thread):
             monitor._chat_send()
         assert "no output" in monitor._chat_pending
+        assert "all assistants failed" in monitor._chat_pending
 
     def test_chat_send_unexpected_exception_captured(self, monitor):
-        """A runtime exception inside the worker still produces an error
-        tag rather than killing the thread silently."""
+        """A runtime exception while spawning is caught per-attempt and the
+        chain continues; with all three failing the combined error names
+        every assistant and includes the exception text."""
         monitor._chat_mode = True
         monitor._chat_input = "q"
         monitor._chat_cursor = 1
@@ -1403,12 +1412,12 @@ class TestChatSubprocessPaths:
             t.start = lambda: target()
             return t
 
-        # Make Popen raise a generic Exception (not FileNotFound/OSError)
         with patch("subprocess.Popen", side_effect=RuntimeError("boom")), \
              patch("threading.Thread", side_effect=immediate_thread):
             monitor._chat_send()
-        assert "unexpected error" in monitor._chat_pending
+        assert "unexpected" in monitor._chat_pending
         assert "boom" in monitor._chat_pending
+        assert "all assistants failed" in monitor._chat_pending
 
 
 class TestChatEndToEndReturnsAnswer:
@@ -1453,7 +1462,12 @@ class TestChatEndToEndReturnsAnswer:
         assert replies, "expected an assistant reply in chat history"
         assert replies[-1]["content"] == "hello world"
 
-    def test_timeout_path_sets_marker_and_kills_proc(self, monitor):
+    def test_timeout_drives_full_fallback_chain_and_kills_each_proc(self,
+                                                                     monitor):
+        """When every CLI times out the fallback chain runs all three, kills
+        each subprocess, and surfaces a combined "all assistants failed"
+        message via poll. Default timeout is 60s — verify the marker
+        reports it."""
         import subprocess
         monitor._chat_mode = True
         monitor._chat_input = "q"
@@ -1461,7 +1475,7 @@ class TestChatEndToEndReturnsAnswer:
 
         fake = MagicMock()
         fake.communicate.side_effect = subprocess.TimeoutExpired(
-            ["claude"], 90)
+            ["assistant"], 60)
 
         with patch("subprocess.Popen", return_value=fake), \
              patch("threading.Thread",
@@ -1469,17 +1483,18 @@ class TestChatEndToEndReturnsAnswer:
             monitor._chat_send()
 
         assert monitor._chat_pending is not None
-        assert "timed out" in monitor._chat_pending
-        fake.kill.assert_called_once()
-        # Default timeout dropped from 300s → 90s; the marker reports it.
-        assert "90s" in monitor._chat_pending
+        assert "all assistants failed" in monitor._chat_pending
+        # Each label timed out at 60s.
+        assert monitor._chat_pending.count("timed out after 60s") == 3
+        # Each subprocess was killed (one per CLI in the chain).
+        assert fake.kill.call_count == 3
 
-        # Poll still hands the marker to the message list so the user
-        # sees *something* instead of being stuck on the spinner forever.
         changed = monitor._poll_chat_result()
         assert changed is True
         assert monitor._chat_loading is False
-        assert any("timed out" in m["content"]
+        # Status is cleared so the spinner doesn't outlive the response.
+        assert monitor._chat_status is None
+        assert any("all assistants failed" in m["content"]
                    for m in monitor._chat_messages
                    if m["role"] == "assistant")
 
@@ -1511,6 +1526,150 @@ class TestChatEndToEndReturnsAnswer:
         assert monitor._chat_loading is False
 
 
+class TestChatFallbackChain:
+    """Verify the claude → codex → gemini fallback. Each scenario uses a
+    Popen side_effect that returns a different mock per call so individual
+    attempts can succeed or fail independently."""
+
+    @staticmethod
+    def _immediate_thread(target=None, daemon=None, **kw):
+        t = MagicMock()
+        t.start = lambda: target()
+        return t
+
+    @staticmethod
+    def _make_proc(stdout=b"", stderr=b"", returncode=0,
+                    timeout_seconds=None):
+        import subprocess
+        fake = MagicMock()
+        if timeout_seconds is not None:
+            fake.communicate.side_effect = subprocess.TimeoutExpired(
+                ["x"], timeout_seconds)
+        else:
+            fake.communicate.return_value = (stdout, stderr)
+        fake.returncode = returncode
+        return fake
+
+    def test_claude_succeeds_no_fallback_invoked(self, monitor):
+        """When the first CLI answers, the chain stops immediately — only
+        one Popen call is made and the status reflects claude."""
+        monitor._chat_mode = True
+        monitor._chat_input = "q"
+        monitor._chat_cursor = 1
+
+        claude_proc = self._make_proc(stdout=b"claude answer", returncode=0)
+        with patch("subprocess.Popen", return_value=claude_proc) as popen, \
+             patch("threading.Thread",
+                   side_effect=self._immediate_thread):
+            monitor._chat_send()
+
+        assert popen.call_count == 1
+        assert monitor._chat_pending == "claude answer"
+        # First CLI invoked is claude.
+        first_argv = popen.call_args_list[0][0][0]
+        assert first_argv[0] == "claude"
+
+    def test_claude_timeout_falls_back_to_codex_success(self, monitor):
+        """claude times out → status flips to "trying with codex…" → codex
+        responds → final answer is codex's."""
+        monitor._chat_mode = True
+        monitor._chat_input = "q"
+        monitor._chat_cursor = 1
+
+        claude_proc = self._make_proc(timeout_seconds=60)
+        codex_proc = self._make_proc(stdout=b"codex answer", returncode=0)
+        gemini_proc = self._make_proc(stdout=b"gemini answer", returncode=0)
+
+        # side_effect returns next proc per call: claude, codex, gemini
+        with patch("subprocess.Popen",
+                   side_effect=[claude_proc, codex_proc, gemini_proc]
+                   ) as popen, \
+             patch("threading.Thread",
+                   side_effect=self._immediate_thread):
+            monitor._chat_send()
+
+        assert popen.call_count == 2  # claude + codex; gemini not reached
+        argvs = [c[0][0] for c in popen.call_args_list]
+        assert argvs[0][0] == "claude"
+        assert argvs[1][0] == "codex"
+        assert monitor._chat_pending == "codex answer"
+        # claude was killed on timeout; codex was not.
+        claude_proc.kill.assert_called_once()
+        codex_proc.kill.assert_not_called()
+
+    def test_claude_and_codex_fail_gemini_succeeds(self, monitor):
+        """Two failures, then gemini lands the answer."""
+        monitor._chat_mode = True
+        monitor._chat_input = "q"
+        monitor._chat_cursor = 1
+
+        claude_proc = self._make_proc(timeout_seconds=60)
+        codex_proc = self._make_proc(stdout=b"", stderr=b"auth error",
+                                      returncode=1)
+        gemini_proc = self._make_proc(stdout=b"gemini answer", returncode=0)
+
+        with patch("subprocess.Popen",
+                   side_effect=[claude_proc, codex_proc, gemini_proc]
+                   ) as popen, \
+             patch("threading.Thread",
+                   side_effect=self._immediate_thread):
+            monitor._chat_send()
+
+        assert popen.call_count == 3
+        argvs = [c[0][0] for c in popen.call_args_list]
+        assert [a[0] for a in argvs] == ["claude", "codex", "gemini"]
+        assert monitor._chat_pending == "gemini answer"
+
+    def test_status_message_progresses_through_chain(self, monitor):
+        """`_chat_status` updates between attempts so the user sees which
+        assistant is currently being tried."""
+        monitor._chat_mode = True
+        monitor._chat_input = "q"
+        monitor._chat_cursor = 1
+
+        observed = []
+
+        def fake_run_attempt(self_inner, argv, stdin_text, env, timeout,
+                              label):
+            # Capture status at the moment the attempt is invoked.
+            observed.append((label, self_inner._chat_status))
+            if label == "gemini":
+                return True, "gemini answer"
+            return False, f"{label} failed"
+
+        with patch.object(procmon.ProcMonUI, "_run_assistant_attempt",
+                          fake_run_attempt), \
+             patch("threading.Thread",
+                   side_effect=self._immediate_thread):
+            monitor._chat_send()
+
+        labels = [o[0] for o in observed]
+        statuses = [o[1] for o in observed]
+        assert labels == ["claude", "codex", "gemini"]
+        assert statuses[0] == "[claude thinking…]"
+        assert statuses[1] == "[trying with codex…]"
+        assert statuses[2] == "[trying with gemini…]"
+        assert monitor._chat_pending == "gemini answer"
+
+    def test_loading_marker_renders_dynamic_status(self, monitor):
+        """The chat overlay loading marker reflects `_chat_status` so the
+        user sees the in-flight assistant label, not a hardcoded "claude"."""
+        monitor._chat_mode = True
+        monitor._chat_loading = True
+        monitor._chat_status = "[trying with codex…]"
+        monitor._chat_input = ""
+        monitor._chat_cursor = 0
+        monitor._chat_messages = []
+        monitor._chat_context_label = "Process list"
+
+        captured = []
+        with patch("curses.color_pair", side_effect=lambda n: n << 8), \
+             patch("curses.curs_set"), \
+             patch.object(monitor, "_put",
+                          side_effect=lambda *a, **k: captured.append(a)):
+            monitor._render_chat()
+        text = " ".join(str(c[2]) for c in captured if len(c) > 2)
+        assert "trying with codex" in text
 
 
 class TestCollectChatContextFallback:

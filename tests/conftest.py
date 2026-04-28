@@ -105,6 +105,7 @@ def monitor():
     mon._chat_loading = False
     mon._chat_worker = None
     mon._chat_pending = None
+    mon._chat_status = None
     mon._chat_context_label = ""
     mon._chat_context_text = ""
     # LLM executive-summary state (per-scope)
