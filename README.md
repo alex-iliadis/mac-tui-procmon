@@ -9,7 +9,7 @@
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](LICENSE)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![macOS 13+](https://img.shields.io/badge/macOS-13%2B-lightgrey)
-![Tests 1083 passing](https://img.shields.io/badge/tests-1083%20passing-brightgreen)
+![Tests 1055 passing](https://img.shields.io/badge/tests-1055%20passing-brightgreen)
 ![Coverage 75%](https://img.shields.io/badge/coverage-75%25-brightgreen)
 ![AI Claude · Codex · Gemini](https://img.shields.io/badge/AI-Claude%20%C2%B7%20Codex%20%C2%B7%20Gemini-8a2be2)
 
