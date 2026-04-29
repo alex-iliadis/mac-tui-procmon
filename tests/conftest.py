@@ -223,5 +223,9 @@ def monitor():
     mon._narrator_history = []
     mon._narrator_history_max = 20
     mon._narrator_speak_lock = _t_narrator.Lock()
+    # Feature 3: Resource Oscilloscope
+    mon._oscilloscope_mode = False
+    mon._oscilloscope_pid = None
+    mon._oscilloscope_scroll = 0
     mon._test_select_pid = 0
     return mon

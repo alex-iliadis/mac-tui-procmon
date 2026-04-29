@@ -2360,6 +2360,67 @@ def fmt_rate(bps):
 _SPARK_BLOCKS = "▁▂▃▄▅▆▇█"
 
 
+def _braille_waveform(values, width=60, height=4):
+    """Render a numeric series as `height` rows of Braille glyphs.
+
+    Each Braille cell encodes a 2-wide × 4-tall bit grid (8 dots). We
+    treat one *column* of input as one Braille cell so each cell shows
+    two adjacent samples sharing a column. Within a cell, the 4-tall
+    height is fanned out to (4 × height) sub-rows so a stack of `height`
+    Braille rows yields `height × 4` total vertical resolution.
+
+    Returns a list of `height` strings, each of length `width`.
+    Empty input → list of `height` blank-string rows.
+    """
+    if width <= 0 or height <= 0:
+        return [""] * max(0, height)
+    rows = ["" for _ in range(height)]
+    if not values:
+        return [" " * width for _ in range(height)]
+    # Two samples per Braille cell horizontally; downsample / pad to
+    # exactly width*2 samples.
+    target = width * 2
+    series = list(values)
+    if len(series) > target:
+        # Take the most-recent window.
+        series = series[-target:]
+    elif len(series) < target:
+        series = [0.0] * (target - len(series)) + series
+    peak = max(series) if series else 0.0
+    if peak <= 0:
+        return [" " * width for _ in range(height)]
+    total_levels = height * 4  # 4 vertical dots per row × `height` rows
+    # Convert each sample to an integer level in [0, total_levels].
+    levels = []
+    for v in series:
+        lvl = int((max(0.0, float(v)) / peak) * total_levels)
+        lvl = max(0, min(total_levels, lvl))
+        levels.append(lvl)
+    # Braille left-column dots: 0x40 (bottom-most), 0x04, 0x02, 0x01 (top)
+    # Right-column dots:        0x80,                0x20, 0x10, 0x08
+    LEFT_DOTS = (0x40, 0x04, 0x02, 0x01)
+    RIGHT_DOTS = (0x80, 0x20, 0x10, 0x08)
+    for ri in range(height):
+        # Top row first → invert ri so the highest amplitude lands at top.
+        row_top = (height - ri) * 4  # exclusive upper bound
+        row_bot = row_top - 4        # inclusive lower bound
+        cells = []
+        for ci in range(width):
+            left_lvl = levels[ci * 2]
+            right_lvl = levels[ci * 2 + 1] if (ci * 2 + 1) < len(levels) else 0
+            mask = 0
+            for di in range(4):
+                # absolute height level for this sub-row (inside this row)
+                lvl_threshold = row_bot + di + 1
+                if left_lvl >= lvl_threshold:
+                    mask |= LEFT_DOTS[di]
+                if right_lvl >= lvl_threshold:
+                    mask |= RIGHT_DOTS[di]
+            cells.append(chr(0x2800 + mask))
+        rows[ri] = "".join(cells)
+    return rows
+
+
 def _sparkline(values, width=24):
     """Render an iterable of numeric samples as Unicode-block bars.
 
@@ -3274,6 +3335,14 @@ class ProcMonUI:
         self._narrator_history = []     # ring of last-spotlighted (pid, caption)
         self._narrator_history_max = 20
         self._narrator_speak_lock = threading.Lock()
+        # ── Feature 3: Resource Oscilloscope ────────────────────────
+        # Synchronized stacked Braille waveforms for one PID across all
+        # sampled metrics. Ring buffer in `_metric_history` already holds
+        # the per-PID series — we just extend the metrics dict to cover
+        # disk, GPU, FD, mach-port counts so all 9 lanes have data.
+        self._oscilloscope_mode = False
+        self._oscilloscope_pid = None
+        self._oscilloscope_scroll = 0
         # Test-only TUI report capture. This is intentionally opt-in so the
         # normal user-facing UI stays unchanged. The harness uses it to export
         # the exact detail-pane buffer for post-run assertions.
@@ -4083,17 +4152,26 @@ class ProcMonUI:
             for p in all_procs:
                 pid = p["pid"]
                 hist = self._metric_history.setdefault(pid, {})
-                for k in ("cpu", "rss_kb", "net_in", "net_out"):
+                # Feature 3: Oscilloscope — extend metric set to cover
+                # disk, GPU, FD count, and mach-port count so the full
+                # waveform stack has data. Older code that only reads
+                # ("cpu", "rss_kb", "net_in", "net_out") still works.
+                for k in ("cpu", "rss_kb", "net_in", "net_out",
+                          "disk_in", "disk_out", "gpu_pct",
+                          "fds", "mach_ports"):
                     dq = hist.get(k)
                     if dq is None:
                         dq = collections.deque(
                             maxlen=self._metric_history_max)
                         hist[k] = dq
                     val = p.get(k, 0)
-                    # Net rates can be -1 ("no sample yet"); coerce to 0.
-                    if k in ("net_in", "net_out") and val < 0:
+                    if val is None:
                         val = 0
-                    dq.append(float(max(0.0, val)))
+                    # Rates / counts can be -1 ("no sample yet"); coerce.
+                    if k in ("net_in", "net_out", "disk_in", "disk_out",
+                              "fds", "mach_ports") and val < 0:
+                        val = 0
+                    dq.append(float(max(0.0, float(val))))
                 self._metric_history_seen[pid] = seen_now
             # Eviction pass — drop pids not seen recently.
             stale = [pid for pid, last in self._metric_history_seen.items()
@@ -4261,7 +4339,20 @@ class ProcMonUI:
             return
 
         # ── Compute detail box content and height ──
-        if self._inspect_mode:
+        if self._oscilloscope_mode and self._oscilloscope_pid is not None:
+            detail_all_lines = self._build_oscilloscope_lines(
+                self._oscilloscope_pid, w)
+            sel_cmd = ""
+            for r in self.rows:
+                if r["pid"] == self._oscilloscope_pid:
+                    sel_cmd = r.get("command", "").split()[0].rsplit(
+                        "/", 1)[-1][:24]
+                    break
+            detail_title = (f"Oscilloscope — {sel_cmd} "
+                            f"(PID {self._oscilloscope_pid})")
+            max_detail_h = max(10, (h - y) * 3 // 4)
+            detail_h = min(len(detail_all_lines) + 2, max_detail_h)
+        elif self._inspect_mode:
             if self._inspect_lines:
                 detail_all_lines = list(self._inspect_lines)
                 summary = (self._llm_summary.get("inspect")
@@ -4951,6 +5042,7 @@ class ProcMonUI:
                 ("N", "Net"),
                 ("T", "Triage"),
                 ("U", "PIDlog"),
+                ("o", "Oscope"),
                 ("?", "Ask"),
                 ("\\", "Narrator"),
                 ("L", "Log"),
@@ -5215,13 +5307,16 @@ class ProcMonUI:
             self._toggle_process_triage_mode()
         elif key == ord("U"):
             self._toggle_unified_log_mode()
+        elif key == ord("o"):
+            self._toggle_oscilloscope_mode()
         elif key == ord("\\"):
             self._toggle_narrator_mode()
         elif key == ord("\t"):
             if (self._inspect_mode or self._net_mode
                     or self._events_mode
                     or self._audit_mode or self._traffic_mode
-                    or self._unified_log_mode):
+                    or self._unified_log_mode
+                    or self._oscilloscope_mode):
                 self._detail_focus = True
         elif key == ord("C"):  # Shift+C — alert config
             self._prompt_config()
@@ -5230,7 +5325,11 @@ class ProcMonUI:
         elif key == ord("k"):
             self._kill_selected()
         elif key == 27:  # Escape
-            if self._inspect_mode:
+            if self._oscilloscope_mode:
+                self._oscilloscope_mode = False
+                self._oscilloscope_pid = None
+                self._detail_focus = False
+            elif self._inspect_mode:
                 self._inspect_mode = False
                 self._detail_focus = False
             elif self._events_mode:
@@ -8055,6 +8154,66 @@ class ProcMonUI:
             self._inspect_pending = ("error", [f"[Inspect error: {e}]"])
         finally:
             self._inspect_phase = ""
+
+    # ── Feature 3: Resource Oscilloscope ───────────────────────────────
+
+    _OSCILLOSCOPE_LANES = (
+        ("cpu", "CPU %", "%.1f"),
+        ("rss_kb", "RSS MB", "%.0f"),  # special: kb→mb in render
+        ("net_in", "Net IN B/s", "%.0f"),
+        ("net_out", "Net OUT B/s", "%.0f"),
+        ("disk_in", "Disk R B/s", "%.0f"),
+        ("disk_out", "Disk W B/s", "%.0f"),
+        ("gpu_pct", "GPU %", "%.1f"),
+        ("fds", "FDs", "%.0f"),
+        ("mach_ports", "Mach ports", "%.0f"),
+    )
+
+    def _toggle_oscilloscope_mode(self):
+        """Toggle the multi-metric Braille oscilloscope (default key: o)."""
+        if self._oscilloscope_mode:
+            self._oscilloscope_mode = False
+            self._oscilloscope_pid = None
+            self._detail_focus = False
+            return
+        if not self.rows:
+            return
+        sel = self.rows[self.selected]
+        self._oscilloscope_pid = sel["pid"]
+        self._oscilloscope_scroll = 0
+        self._oscilloscope_mode = True
+        # Other modes are mutually exclusive — close them so we own the pane.
+        self._inspect_mode = False
+        self._net_mode = False
+        self._audit_mode = False
+        if getattr(self, "_events_mode", False):
+            self._stop_events_stream()
+            self._events_mode = False
+        self._detail_focus = True
+
+    def _build_oscilloscope_lines(self, pid, width):
+        """Build the rendered text lines for the oscilloscope view."""
+        lines = []
+        with self._metric_history_lock:
+            hist = dict(self._metric_history.get(pid) or {})
+            # Make our own snapshot lists so we can render without lock.
+            series = {k: list(v) for k, v in hist.items()}
+        lane_w = max(20, min(60, width - 22))
+        for key, label, fmt in self._OSCILLOSCOPE_LANES:
+            values = series.get(key) or []
+            if key == "rss_kb":
+                values = [v / 1024.0 for v in values]  # kb → MB
+            peak = max(values) if values else 0.0
+            try:
+                peak_str = fmt % peak
+            except Exception:
+                peak_str = str(int(peak))
+            header = f"{label:<13} peak {peak_str}"
+            lines.append(header)
+            waveform = _braille_waveform(values, width=lane_w, height=4)
+            lines.extend(waveform)
+            lines.append("")  # blank separator
+        return lines
 
     def _toggle_inspect_mode(self):
         """Toggle process inspect mode (I key)."""

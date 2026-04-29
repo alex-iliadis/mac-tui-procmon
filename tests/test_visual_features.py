@@ -215,3 +215,77 @@ class TestNarrator:
             with patch.object(monitor, "_narrator_speak_async"):
                 monitor._poll_narrator_result()
         assert len(monitor._narrator_history) == 3
+
+
+# ── 3. Resource Oscilloscope ──────────────────────────────────────────
+
+
+class TestOscilloscope:
+    def test_braille_waveform_basic(self):
+        rows = procmon._braille_waveform([0, 1, 2, 3, 4, 5, 6, 7],
+                                         width=4, height=4)
+        assert len(rows) == 4
+        for r in rows:
+            assert len(r) == 4
+        # All glyphs in the Braille block 0x2800–0x28FF
+        for r in rows:
+            for ch in r:
+                assert 0x2800 <= ord(ch) <= 0x28FF
+
+    def test_braille_waveform_zero_input_blank(self):
+        rows = procmon._braille_waveform([0, 0, 0, 0], width=4, height=2)
+        assert len(rows) == 2
+        # All zero → blank row of spaces
+        for r in rows:
+            assert r == "    "
+
+    def test_braille_waveform_empty_input(self):
+        rows = procmon._braille_waveform([], width=10, height=3)
+        assert len(rows) == 3
+        for r in rows:
+            assert r == "          "
+
+    def test_braille_waveform_zero_width(self):
+        rows = procmon._braille_waveform([1, 2, 3], width=0, height=4)
+        assert all(r == "" for r in rows)
+
+    def test_toggle_mode_on_off(self, monitor):
+        monitor.rows = [_row(42, cmd="busy")]
+        monitor.selected = 0
+        assert monitor._oscilloscope_mode is False
+        monitor._toggle_oscilloscope_mode()
+        assert monitor._oscilloscope_mode is True
+        assert monitor._oscilloscope_pid == 42
+        monitor._toggle_oscilloscope_mode()
+        assert monitor._oscilloscope_mode is False
+        assert monitor._oscilloscope_pid is None
+
+    def test_toggle_disables_other_modes(self, monitor):
+        monitor.rows = [_row(42)]
+        monitor.selected = 0
+        monitor._inspect_mode = True
+        monitor._net_mode = True
+        monitor._toggle_oscilloscope_mode()
+        assert monitor._inspect_mode is False
+        assert monitor._net_mode is False
+
+    def test_build_oscilloscope_lines_renders_braille(self, monitor):
+        import collections as _c
+        monitor._metric_history[7] = {
+            "cpu": _c.deque([0.0, 5.0, 10.0, 15.0], maxlen=60),
+            "rss_kb": _c.deque([0.0, 1024.0], maxlen=60),
+        }
+        lines = monitor._build_oscilloscope_lines(7, width=80)
+        # Find at least one line containing a Braille glyph
+        joined = "\n".join(lines)
+        assert any(0x2800 <= ord(ch) <= 0x28FF for ch in joined)
+        assert "CPU %" in joined
+        assert "RSS MB" in joined
+
+    def test_oscilloscope_lanes_cover_all_metrics(self, monitor):
+        labels = [lane[1] for lane in
+                   procmon.ProcMonUI._OSCILLOSCOPE_LANES]
+        for needed in ("CPU %", "RSS MB", "Net IN B/s", "Net OUT B/s",
+                       "Disk R B/s", "Disk W B/s", "GPU %", "FDs",
+                       "Mach ports"):
+            assert needed in labels
