@@ -5435,13 +5435,86 @@ class ProcMonUI:
         self._galaxy_known_pids = set()
 
     def _galaxy_select_nodes(self):
-        """Pick up to `_galaxy_node_cap` PIDs ranked by aggregate CPU."""
-        rows = sorted(
-            self.rows,
-            key=lambda r: r.get("agg_cpu", r.get("cpu", 0)) or 0,
-            reverse=True,
-        )
+        """Pick up to `_galaxy_node_cap` PIDs ranked by combined load
+        (CPU + memory share). Crypto-bubble-style: heavy processes
+        bubble up to the top of the selection AND get drawn larger,
+        light/idle processes drop off the chart entirely once the cap
+        is full."""
+        total_mem = max(1, self._total_mem_kb)
+        def _score(r):
+            cpu = r.get("agg_cpu", r.get("cpu", 0)) or 0
+            rss = r.get("agg_rss_kb", r.get("rss_kb", 0)) or 0
+            return cpu + (rss / total_mem) * 100.0
+        rows = sorted(self.rows, key=_score, reverse=True)
         return rows[: self._galaxy_node_cap]
+
+    @staticmethod
+    def _galaxy_short_name(row):
+        """Crypto-bubble-style ticker for a process row.
+
+        Caveat: app-bundle paths legitimately contain spaces
+        (`/Applications/Google Chrome.app/...`), so we can't just
+        split on whitespace to drop args — we look for " -" or " --"
+        as the conventional flag separator instead.
+
+        For app bundles, prefer the bundle name when the binary
+        basename matches it; otherwise prefer the binary basename
+        (so a `Google Chrome Helper` binary inside a `Google Chrome`
+        bundle keeps its more specific label). Cap to 12 chars so
+        the longest bubble label still fits.
+        """
+        cmd = (row.get("command") or "").strip()
+        if not cmd:
+            return "?"
+        # Strip flag-style arguments (`--foo`, `-x`). Bundle paths can
+        # contain spaces, so this is more reliable than `split()`.
+        arg_split = cmd.find(" -")
+        if arg_split > 0:
+            cmd = cmd[:arg_split].rstrip()
+        # App bundle: parse out the bundle name
+        if ".app/" in cmd:
+            bundle_part = cmd.split(".app/")[0]
+            bundle_name = bundle_part.rsplit("/", 1)[-1]
+            binary = cmd.rsplit("/", 1)[-1]
+            if (binary != bundle_name
+                    and bundle_name.lower() not in binary.lower()):
+                name = binary
+            else:
+                name = bundle_name
+        else:
+            name = cmd.rsplit("/", 1)[-1]
+        for ext in (".app", ".framework", ".bundle"):
+            if name.endswith(ext):
+                name = name[: -len(ext)]
+        name = name.replace("_", " ").strip()
+        if not name:
+            return "?"
+        return name[:12]
+
+    def _galaxy_bubble_size(self, row):
+        """Map a process's combined load to a bubble (w, h) in cells.
+
+        Sizing tiers:
+          tier 1 (idle):     5 × 3 cells  → small bubble, just the name
+          tier 2 (light):    7 × 3 cells
+          tier 3 (active):   9 × 3 cells  → fits "[Name 47%]" style
+          tier 4 (busy):    11 × 4 cells  → name + cpu%
+          tier 5 (heavy):   13 × 5 cells  → name + cpu% + rss
+        """
+        total_mem = max(1, self._total_mem_kb)
+        cpu = row.get("agg_cpu", row.get("cpu", 0)) or 0
+        rss_kb = row.get("agg_rss_kb", row.get("rss_kb", 0)) or 0
+        mem_pct = (rss_kb / total_mem) * 100.0
+        score = cpu + mem_pct
+        if score >= 30.0:
+            return (13, 5)
+        if score >= 10.0:
+            return (11, 4)
+        if score >= 3.0:
+            return (9, 3)
+        if score >= 0.5:
+            return (7, 3)
+        return (5, 3)
 
     def _galaxy_step(self, w, h):
         """Run one Fruchterman-Reingold-ish iteration of the spring solver.
@@ -5485,21 +5558,37 @@ class ProcMonUI:
                 self._galaxy_velocity[pid] = (0.0, 0.0)
         if not node_pids:
             return
-        # Spring constants
+        # Spring constants — make `k` proportional to the average bubble
+        # size so that heavy nodes get the room they need without
+        # overlapping their neighbours.
+        sizes = {r["pid"]: self._galaxy_bubble_size(r) for r in nodes}
+        avg_w = sum(s[0] for s in sizes.values()) / max(1, len(sizes))
+        avg_h = sum(s[1] for s in sizes.values()) / max(1, len(sizes))
+        avg_radius = max(2.0, (avg_w + avg_h) / 4.0)
         area = bound_w * bound_h
-        k = math.sqrt(area / max(1, len(node_pids)))
-        # Repulsive forces between every pair.
+        k = max(avg_radius, math.sqrt(area / max(1, len(node_pids))))
+        # Repulsive forces between every pair, scaled so that a pair of
+        # large bubbles repels harder than a pair of small ones.
         forces = {pid: [0.0, 0.0] for pid in node_pids}
         for i, p in enumerate(node_pids):
             px, py = self._galaxy_positions[p]
+            pw, ph = sizes[p]
+            pr = (pw + ph) / 4.0
             for j in range(i + 1, len(node_pids)):
                 q = node_pids[j]
                 qx, qy = self._galaxy_positions[q]
+                qw, qh = sizes[q]
+                qr = (qw + qh) / 4.0
                 dx = px - qx
                 dy = py - qy
                 d2 = dx * dx + dy * dy + 0.01
                 d = math.sqrt(d2)
+                # Boost repulsion when the bubbles would overlap;
+                # scale repulsion by the sum of their radii.
+                pair_r = pr + qr
                 rep = (k * k) / d
+                if d < pair_r * 1.5:
+                    rep *= 2.5
                 fx = (dx / d) * rep
                 fy = (dy / d) * rep
                 forces[p][0] += fx
@@ -5542,8 +5631,69 @@ class ProcMonUI:
             self._galaxy_positions[pid] = (x, y)
             self._galaxy_velocity[pid] = (vx, vy)
 
+    def _galaxy_render_bubble(self, row, bw, bh):
+        """Render a single bubble as a list of `bh` strings of width `bw`.
+
+        Uses Unicode rounded box-drawing for the border and centers
+        the abbreviated process name inside. For larger tiers, also
+        renders a CPU% (and RSS for the largest tier) so the bubble
+        carries useful at-a-glance information like a crypto-bubble
+        widget. Glowing (newly-spawned) processes get a `★` prefix
+        on their label.
+        """
+        name = self._galaxy_short_name(row)
+        glow = bool(self._galaxy_glow.get(row.get("pid")))
+        if glow:
+            name = "★" + name
+            name = name[: max(1, bw - 2)]
+        cpu = row.get("agg_cpu", row.get("cpu", 0)) or 0
+        rss_kb = row.get("agg_rss_kb", row.get("rss_kb", 0)) or 0
+
+        def _center(text, width):
+            text = text[:width]
+            pad = width - len(text)
+            left = pad // 2
+            right = pad - left
+            return " " * left + text + " " * right
+
+        inner_w = max(1, bw - 2)
+        # Build the inner content lines (between the top/bottom borders).
+        inner_lines = []
+        if bh <= 3:
+            inner_lines.append(_center(name, inner_w))
+        elif bh == 4:
+            inner_lines.append(_center(name, inner_w))
+            inner_lines.append(_center(f"{cpu:.0f}%", inner_w))
+        else:
+            # bh >= 5: name, cpu, rss
+            inner_lines.append(_center(name, inner_w))
+            inner_lines.append(_center(f"{cpu:.0f}%", inner_w))
+            if rss_kb >= 1024 * 1024:
+                rss_label = f"{rss_kb / (1024 * 1024):.1f}G"
+            elif rss_kb >= 1024:
+                rss_label = f"{rss_kb / 1024:.0f}M"
+            else:
+                rss_label = f"{rss_kb}K"
+            inner_lines.append(_center(rss_label, inner_w))
+            # Pad to exactly bh - 2 inner rows
+            while len(inner_lines) < bh - 2:
+                inner_lines.append(" " * inner_w)
+        # Trim if we somehow generated extra
+        inner_lines = inner_lines[: bh - 2]
+        top = "╭" + "─" * inner_w + "╮"
+        bot = "╰" + "─" * inner_w + "╯"
+        return [top] + ["│" + line + "│" for line in inner_lines] + [bot]
+
     def _build_galaxy_lines(self, w, h):
-        """Render the galaxy graph as text lines."""
+        """Render the galaxy graph as text lines, crypto-bubble-style.
+
+        Each process node is a sized rectangular bubble (5×3 → 13×5
+        cells) with the abbreviated process name centered inside.
+        Heavier processes get bigger bubbles. Edges between parent
+        and child PIDs are drawn faintly behind the bubbles. The
+        spring solver still runs one iteration per render so the
+        layout settles in front of you.
+        """
         if w < 30 or h < 10:
             return [" Galaxy view needs a larger window"]
         # Run one solver step per render to animate.
@@ -5553,7 +5703,7 @@ class ProcMonUI:
         bound_w = max(10, w - 4)
         bound_h = max(6, h - 6)
         grid = [[" "] * bound_w for _ in range(bound_h)]
-        # Edges first (so nodes paint over them)
+        # Edges first (so bubbles paint over them).
         for r in nodes:
             ppid = r.get("ppid", 0)
             pid = r["pid"]
@@ -5563,26 +5713,29 @@ class ProcMonUI:
             x2, y2 = self._galaxy_positions[pid]
             self._orbit_draw_line(
                 grid, (int(x1), int(y1)), (int(x2), int(y2)))
-        # Node glyphs
+        # Bubbles, smallest first so heavy ones paint over light ones.
+        sized = []
         for r in nodes:
+            bw, bh = self._galaxy_bubble_size(r)
+            sized.append((bw * bh, r, bw, bh))
+        sized.sort(key=lambda t: t[0])
+        for _area, r, bw, bh in sized:
             pid = r["pid"]
             x, y = self._galaxy_positions[pid]
-            ix, iy = int(x), int(y)
-            if not (0 <= iy < bound_h and 0 <= ix < bound_w):
-                continue
-            cmd = (r.get("command") or "?")
-            ch = cmd[0] if cmd else "?"
-            # Glow → use a brighter glyph
-            if self._galaxy_glow.get(pid):
-                ch = "★"
-            else:
-                # Size by CPU%. Show as letter for cpu>0, dot otherwise.
-                cpu = r.get("agg_cpu", r.get("cpu", 0)) or 0
-                if cpu > 20:
-                    ch = ch.upper()
-                elif cpu < 0.5:
-                    ch = "·"
-            grid[iy][ix] = ch
+            # Center the bubble on the position; clamp into bounds.
+            x0 = int(x) - bw // 2
+            y0 = int(y) - bh // 2
+            x0 = max(0, min(bound_w - bw, x0))
+            y0 = max(0, min(bound_h - bh, y0))
+            lines = self._galaxy_render_bubble(r, bw, bh)
+            for dy, line in enumerate(lines):
+                row_y = y0 + dy
+                if not (0 <= row_y < bound_h):
+                    continue
+                for dx, ch in enumerate(line):
+                    col_x = x0 + dx
+                    if 0 <= col_x < bound_w:
+                        grid[row_y][col_x] = ch
         return ["".join(row) for row in grid]
 
     def _toggle_net_mode(self):

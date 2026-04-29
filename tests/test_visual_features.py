@@ -493,3 +493,87 @@ class TestProcessGalaxy:
         assert len(lines) == 18
         # All same width
         assert len({len(l) for l in lines}) == 1
+
+    def test_short_name_strips_paths(self, monitor):
+        # bare basename
+        assert monitor._galaxy_short_name(
+            {"command": "/usr/bin/zsh"}) == "zsh"
+        # app bundle: prefer bundle name when binary basename matches
+        assert monitor._galaxy_short_name(
+            {"command": "/Applications/Google Chrome.app/Contents/MacOS/"
+                        "Google Chrome"}) == "Google Chrome"[:12]
+        # app bundle helper: prefer the more specific binary name
+        assert monitor._galaxy_short_name(
+            {"command": "/Applications/Google Chrome.app/Contents/MacOS/"
+                        "Google Chrome Helper (Renderer)"}
+        ).startswith("Google Chrom")
+        # truncates to 12 chars
+        long_cmd = {"command": "/usr/bin/" + "x" * 50}
+        assert len(monitor._galaxy_short_name(long_cmd)) == 12
+        # missing command falls back gracefully
+        assert monitor._galaxy_short_name({"command": ""}) == "?"
+        assert monitor._galaxy_short_name({}) == "?"
+
+    def test_bubble_size_scales_with_load(self, monitor):
+        monitor._total_mem_kb = 16 * 1024 * 1024  # 16 GB
+        # Idle process: smallest bubble
+        idle = {"agg_cpu": 0, "agg_rss_kb": 1024}
+        assert monitor._galaxy_bubble_size(idle) == (5, 3)
+        # Light process
+        light = {"agg_cpu": 1.0, "agg_rss_kb": 50 * 1024}
+        assert monitor._galaxy_bubble_size(light) == (7, 3)
+        # Active process (~10% combined)
+        active = {"agg_cpu": 8.0, "agg_rss_kb": 100 * 1024}
+        assert monitor._galaxy_bubble_size(active) == (9, 3)
+        # Busy process
+        busy = {"agg_cpu": 15.0, "agg_rss_kb": 200 * 1024}
+        assert monitor._galaxy_bubble_size(busy) == (11, 4)
+        # Heavy process — Chrome on a CPU spike
+        heavy = {"agg_cpu": 40.0, "agg_rss_kb": 2 * 1024 * 1024}
+        assert monitor._galaxy_bubble_size(heavy) == (13, 5)
+
+    def test_render_bubble_has_box_drawing_and_name(self, monitor):
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        row = {"pid": 100, "command": "/Applications/Slack.app/Contents/"
+               "MacOS/Slack", "agg_cpu": 12.0, "agg_rss_kb": 300 * 1024}
+        bw, bh = monitor._galaxy_bubble_size(row)
+        lines = monitor._galaxy_render_bubble(row, bw, bh)
+        assert len(lines) == bh
+        for line in lines:
+            assert len(line) == bw
+        # Top + bottom border use rounded box-drawing
+        assert lines[0].startswith("╭") and lines[0].endswith("╮")
+        assert lines[-1].startswith("╰") and lines[-1].endswith("╯")
+        # Sides are vertical bars
+        for mid in lines[1:-1]:
+            assert mid[0] == "│" and mid[-1] == "│"
+        # Process name appears somewhere inside
+        body = "\n".join(lines[1:-1])
+        assert "Slack" in body
+        # CPU% rendered for tier-4 bubble
+        assert "12%" in body
+
+    def test_glow_prefix_in_bubble_for_new_pid(self, monitor):
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        row = {"pid": 200, "command": "/usr/bin/launchctl",
+               "agg_cpu": 0.1, "agg_rss_kb": 1024}
+        monitor._galaxy_glow[200] = 5
+        bw, bh = monitor._galaxy_bubble_size(row)
+        lines = monitor._galaxy_render_bubble(row, bw, bh)
+        body = "\n".join(lines[1:-1])
+        assert "★" in body
+
+    def test_galaxy_lines_contain_bubble_glyphs(self, monitor):
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        monitor.rows = self._make_rows(5)
+        # Bump one row to a heavy bubble
+        monitor.rows[0]["agg_cpu"] = 50.0
+        monitor.rows[0]["agg_rss_kb"] = 2 * 1024 * 1024
+        monitor.rows[0]["command"] = "Chrome"
+        lines = monitor._build_galaxy_lines(120, 30)
+        joined = "\n".join(lines)
+        # Bubbles are drawn somewhere on the canvas
+        assert "╭" in joined
+        assert "╯" in joined
+        # The heavy process name shows up
+        assert "Chrome" in joined
