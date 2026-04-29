@@ -4374,8 +4374,14 @@ class ProcMonUI:
             sel_line = -1
         self._capture_detail_snapshot(detail_y, w, detail_title,
                                       detail_all_lines, scroll)
-        self._render_detail(detail_y, w, detail_all_lines, detail_title,
-                            scroll, self._detail_focus, sel_line)
+        # Galaxy mode renders directly with full color / blink / glow
+        # support; skip the generic detail pane to avoid double-drawing.
+        if self._galaxy_mode:
+            self._render_galaxy_direct(detail_y, w)
+        else:
+            self._render_detail(detail_y, w, detail_all_lines,
+                                detail_title, scroll, self._detail_focus,
+                                sel_line)
 
         # ── Shortcut bar (mc-style) ──
         self._render_shortcut_bar(h, w)
@@ -5436,17 +5442,46 @@ class ProcMonUI:
 
     def _galaxy_select_nodes(self):
         """Pick up to `_galaxy_node_cap` PIDs ranked by combined load
-        (CPU + memory share). Crypto-bubble-style: heavy processes
-        bubble up to the top of the selection AND get drawn larger,
-        light/idle processes drop off the chart entirely once the cap
-        is full."""
+        (CPU + memory share), AND drop pure-idle processes so the
+        canvas isn't clogged with dim dots that have no story to tell.
+
+        A process qualifies if it has a non-trivial load score (>= 0.05)
+        OR is a parent/child of a qualifying process (so the tree
+        topology of an active subtree stays visible). Anything else is
+        hidden from the galaxy entirely; the count is summarised in
+        the panel header.
+        """
         total_mem = max(1, self._total_mem_kb)
         def _score(r):
             cpu = r.get("agg_cpu", r.get("cpu", 0)) or 0
             rss = r.get("agg_rss_kb", r.get("rss_kb", 0)) or 0
             return cpu + (rss / total_mem) * 100.0
-        rows = sorted(self.rows, key=_score, reverse=True)
-        return rows[: self._galaxy_node_cap]
+        scored = [(r, _score(r)) for r in self.rows]
+        # Stage 1: keep all scored ≥ 0.05 (the "interesting" set)
+        threshold = 0.05
+        interesting_pids = {r["pid"] for r, s in scored if s >= threshold}
+        # Stage 2: include direct parents/children of interesting
+        # so chains of active subtree members stay connected.
+        by_pid = {r["pid"]: r for r in self.rows}
+        connect = set()
+        for pid in interesting_pids:
+            r = by_pid.get(pid)
+            if r:
+                ppid = r.get("ppid", 0)
+                if ppid and ppid in by_pid and ppid not in interesting_pids:
+                    connect.add(ppid)
+        for r in self.rows:
+            if r.get("ppid") in interesting_pids and r["pid"] not in interesting_pids:
+                connect.add(r["pid"])
+        kept = interesting_pids | connect
+        sorted_rows = sorted(
+            (r for r, _ in scored if r["pid"] in kept),
+            key=lambda r: _score(r),
+            reverse=True,
+        )
+        # Track how many we hid so the header can advertise it.
+        self._galaxy_hidden_count = len(self.rows) - len(sorted_rows)
+        return sorted_rows[: self._galaxy_node_cap]
 
     @staticmethod
     def _galaxy_short_name(row):
@@ -5494,12 +5529,16 @@ class ProcMonUI:
     def _galaxy_bubble_size(self, row):
         """Map a process's combined load to a bubble (w, h) in cells.
 
+        Floors bumped from earlier 5×3 → 9×3 minimum so the smallest
+        bubble's inner row still has 7 cells of name space — enough
+        to render `Chrome`, `Slack`, `Docker`, etc. without truncation.
+
         Sizing tiers:
-          tier 1 (idle):     5 × 3 cells  → small bubble, just the name
-          tier 2 (light):    7 × 3 cells
-          tier 3 (active):   9 × 3 cells  → fits "[Name 47%]" style
-          tier 4 (busy):    11 × 4 cells  → name + cpu%
-          tier 5 (heavy):   13 × 5 cells  → name + cpu% + rss
+          tier 1 (faint):    9 × 3 cells  → name only (7-char inner)
+          tier 2 (light):   11 × 3 cells  → 9-char inner
+          tier 3 (active):  13 × 4 cells  → name + cpu%
+          tier 4 (busy):    15 × 5 cells  → name + cpu% + rss
+          tier 5 (heavy):   17 × 5 cells  → bigger heading, room for "Google Chrome"
         """
         total_mem = max(1, self._total_mem_kb)
         cpu = row.get("agg_cpu", row.get("cpu", 0)) or 0
@@ -5507,14 +5546,72 @@ class ProcMonUI:
         mem_pct = (rss_kb / total_mem) * 100.0
         score = cpu + mem_pct
         if score >= 30.0:
-            return (13, 5)
+            return (17, 5)
         if score >= 10.0:
-            return (11, 4)
+            return (15, 5)
         if score >= 3.0:
-            return (9, 3)
+            return (13, 4)
         if score >= 0.5:
-            return (7, 3)
-        return (5, 3)
+            return (11, 3)
+        return (9, 3)
+
+    @staticmethod
+    def _galaxy_load_tier(row, total_mem_kb):
+        """Quantise a row's load into a tier 0..4 used for color theming.
+
+        Mirrors `_galaxy_bubble_size`'s tiers but returns an integer so
+        the renderer can pick `(border_color, fill_color)` from a small
+        lookup rather than re-deriving thresholds inline.
+        """
+        cpu = row.get("agg_cpu", row.get("cpu", 0)) or 0
+        rss_kb = row.get("agg_rss_kb", row.get("rss_kb", 0)) or 0
+        mem_pct = (rss_kb / max(1, total_mem_kb)) * 100.0
+        score = cpu + mem_pct
+        if score >= 30.0:
+            return 4   # heavy
+        if score >= 10.0:
+            return 3   # busy
+        if score >= 3.0:
+            return 2   # active
+        if score >= 0.5:
+            return 1   # light
+        return 0       # faint
+
+    def _galaxy_vendor_label(self, row):
+        """Best-effort vendor classification for color theming. Returns a
+        short tag like 'apple' / 'google' / 'microsoft' / 'mozilla' /
+        'jetbrains' / 'docker' / 'discord' / 'figma' / 'unknown'. Used
+        only by the galaxy renderer to pick a fill color; for everything
+        else, the existing vendor logic still applies."""
+        cmd = (row.get("command") or "").lower()
+        if "/applications/" in cmd or ".app/" in cmd:
+            if "google chrome" in cmd or "/chrome" in cmd:
+                return "google"
+            if "/firefox" in cmd or "mozilla" in cmd:
+                return "mozilla"
+            if "microsoft " in cmd or "/teams" in cmd or "edge" in cmd:
+                return "microsoft"
+            if "/slack" in cmd:
+                return "slack"
+            if "discord" in cmd:
+                return "discord"
+            if "spotify" in cmd:
+                return "spotify"
+            if "/figma" in cmd:
+                return "figma"
+            if "docker" in cmd:
+                return "docker"
+            if "jetbrains" in cmd or "/idea" in cmd or "/pycharm" in cmd:
+                return "jetbrains"
+            if "code helper" in cmd or "visual studio code" in cmd or "/code" in cmd:
+                return "vscode"
+        if cmd.startswith("/system/") or cmd.startswith("/usr/libexec/"):
+            return "apple"
+        if cmd.startswith("/usr/bin/") or cmd.startswith("/sbin/"):
+            return "apple"
+        if cmd.startswith("/bin/") or cmd.startswith("/usr/sbin/"):
+            return "apple"
+        return "unknown"
 
     def _galaxy_step(self, w, h):
         """Run one Fruchterman-Reingold-ish iteration of the spring solver.
@@ -5683,6 +5780,226 @@ class ProcMonUI:
         top = "╭" + "─" * inner_w + "╮"
         bot = "╰" + "─" * inner_w + "╯"
         return [top] + ["│" + line + "│" for line in inner_lines] + [bot]
+
+    # Vendor → curses color_pair_id (declared in __init__'s init_pair table).
+    _GALAXY_VENDOR_COLORS = {
+        "google":     9,   # steel blue
+        "apple":      1,   # green
+        "microsoft":  7,   # cyan
+        "mozilla":    6,   # orange
+        "slack":      8,   # magenta
+        "discord":    8,   # magenta
+        "spotify":    1,   # green (Spotify brand)
+        "figma":     12,   # salmon
+        "docker":     9,   # steel blue
+        "jetbrains":  3,   # yellow
+        "vscode":     9,   # steel blue
+        "unknown":   10,   # light grey
+    }
+    # Load tier → color when vendor is unknown.
+    _GALAXY_TIER_COLORS = {
+        0: 10,   # faint: light grey
+        1:  1,   # light: green
+        2:  7,   # active: cyan
+        3:  6,   # busy: orange
+        4:  5,   # heavy: red
+    }
+
+    def _galaxy_render_direct(self, start_y, w):
+        """Render the galaxy view directly into curses with full color
+        + visual-effect support (vendor fills, load-tier borders, glow
+        on new PIDs, blink on heavy load). Bypasses the generic
+        `_render_detail` path so we can paint background fills via
+        `A_REVERSE` and pick per-bubble attributes individually.
+
+        Returns the y where rendering ended so the caller can place
+        anything below the panel.
+        """
+        h, _ = self.stdscr.getmaxyx()
+        if start_y >= h - 2 or not self.rows:
+            return start_y
+
+        # Match the detail-pane geometry so the title/border align with
+        # the rest of the app's chrome.
+        box_w = w
+        inner_h = max(6, h - start_y - 3)
+
+        # Title row: borrow the existing detail-box style.
+        nodes = self._galaxy_select_nodes()
+        hidden = getattr(self, "_galaxy_hidden_count", 0)
+        title = (f" Process Galaxy — {len(nodes)} bubbles"
+                 + (f"  (+{hidden} idle hidden)" if hidden else ""))
+        title_str = f"┌─{title} "
+        top = title_str + "─" * max(0, box_w - len(title_str) - 1) + "┐"
+        try:
+            self._put(start_y, 0, top[:w],
+                      curses.color_pair(2) | curses.A_BOLD)
+        except curses.error:
+            pass
+
+        # Compute layout into a virtual grid first (chars + per-cell attrs).
+        bound_w = max(10, w - 4)
+        bound_h = max(6, inner_h)
+        if w < 30 or inner_h < 10:
+            try:
+                self._put(start_y + 1, 0,
+                          " Galaxy view needs a larger window".ljust(w),
+                          curses.color_pair(2))
+            except curses.error:
+                pass
+            return start_y + 2
+
+        self._galaxy_step(w, bound_h)
+        node_set = {r["pid"] for r in nodes}
+
+        # 2-D grid: each cell is (char, color_pair_id, extra_attrs).
+        EMPTY = (" ", 0, 0)
+        grid = [[EMPTY for _ in range(bound_w)] for _ in range(bound_h)]
+
+        # 1) Edges first (faint dotted lines between parent and child).
+        edge_attr = curses.color_pair(10) | curses.A_DIM
+        for r in nodes:
+            ppid = r.get("ppid", 0)
+            pid = r["pid"]
+            if ppid not in node_set or ppid == pid:
+                continue
+            x1, y1 = self._galaxy_positions[ppid]
+            x2, y2 = self._galaxy_positions[pid]
+            self._galaxy_draw_edge_into_grid(
+                grid, (int(x1), int(y1)), (int(x2), int(y2)),
+                bound_w, bound_h, edge_attr)
+
+        # 2) Bubbles, smallest first so heavy ones overdraw lighter ones.
+        sized = []
+        total_mem = max(1, self._total_mem_kb)
+        for r in nodes:
+            bw, bh = self._galaxy_bubble_size(r)
+            sized.append((bw * bh, r, bw, bh))
+        sized.sort(key=lambda t: t[0])
+        for _area, r, bw, bh in sized:
+            pid = r["pid"]
+            x, y = self._galaxy_positions[pid]
+            x0 = int(x) - bw // 2
+            y0 = int(y) - bh // 2
+            x0 = max(0, min(bound_w - bw, x0))
+            y0 = max(0, min(bound_h - bh, y0))
+            tier = self._galaxy_load_tier(r, total_mem)
+            vendor = self._galaxy_vendor_label(r)
+            fill_pair = self._GALAXY_VENDOR_COLORS.get(
+                vendor, self._GALAXY_TIER_COLORS[tier])
+            border_pair = self._GALAXY_TIER_COLORS[tier]
+            border_extra = curses.A_BOLD if tier >= 3 else 0
+            inner_extra = curses.A_REVERSE  # solid filled bubble
+            if tier >= 4:
+                inner_extra |= curses.A_BOLD
+            # Glow on newly-spawned PIDs: brighten the border, blink it.
+            glow = bool(self._galaxy_glow.get(pid))
+            if glow:
+                border_pair = 3   # bright yellow
+                border_extra |= curses.A_BOLD | curses.A_BLINK
+            # Anomaly blink on cpu > 80%.
+            cpu_val = r.get("agg_cpu", r.get("cpu", 0)) or 0
+            anomaly = cpu_val >= 80.0
+            lines = self._galaxy_render_bubble(r, bw, bh)
+            for dy, line in enumerate(lines):
+                row_y = y0 + dy
+                if not (0 <= row_y < bound_h):
+                    continue
+                is_border = (dy == 0 or dy == bh - 1)
+                for dx, ch in enumerate(line):
+                    col_x = x0 + dx
+                    if not (0 <= col_x < bound_w):
+                        continue
+                    is_side = (dx == 0 or dx == bw - 1) and not is_border
+                    if is_border or is_side:
+                        grid[row_y][col_x] = (ch, border_pair, border_extra)
+                    else:
+                        attr_extra = inner_extra
+                        if anomaly:
+                            attr_extra |= curses.A_BLINK
+                        grid[row_y][col_x] = (ch, fill_pair, attr_extra)
+
+        # 3) Paint the grid into curses, row by row.
+        for row_y, row in enumerate(grid):
+            screen_y = start_y + 1 + row_y
+            if screen_y >= h - 2:
+                break
+            # Left border
+            try:
+                self._put(screen_y, 0, "│", curses.A_DIM)
+            except curses.error:
+                pass
+            # Cell-by-cell; coalesce runs of the same attr into single
+            # writes to keep the per-frame syscall count down.
+            x = 1
+            run_start = None
+            run_attr = None
+            run_chars = []
+            def _flush(run_start_local, run_chars_local, run_attr_local):
+                if run_start_local is None or not run_chars_local:
+                    return
+                try:
+                    self._put(screen_y, run_start_local + 1,
+                              "".join(run_chars_local), run_attr_local)
+                except curses.error:
+                    pass
+            for col_x, (ch, pair, extra) in enumerate(row):
+                attr = (curses.color_pair(pair) | extra) if pair else extra
+                if run_attr is None or attr == run_attr:
+                    if run_start is None:
+                        run_start = col_x
+                    run_chars.append(ch)
+                    run_attr = attr
+                else:
+                    _flush(run_start, run_chars, run_attr)
+                    run_start = col_x
+                    run_chars = [ch]
+                    run_attr = attr
+            _flush(run_start, run_chars, run_attr)
+            # Right border
+            if box_w - 1 < w:
+                try:
+                    self._put(screen_y, box_w - 1, "│", curses.A_DIM)
+                except curses.error:
+                    pass
+
+        # Bottom border
+        bot_y = start_y + 1 + bound_h
+        if bot_y < h - 1:
+            bot = "└" + "─" * max(0, box_w - 2) + "┘"
+            try:
+                self._put(bot_y, 0, bot[:w], curses.A_DIM)
+            except curses.error:
+                pass
+        return bot_y + 1
+
+    @staticmethod
+    def _galaxy_draw_edge_into_grid(grid, p1, p2, w, h, attr):
+        """Bresenham-ish line into a (char, pair, extra) cell grid."""
+        x1, y1 = p1
+        x2, y2 = p2
+        dx = abs(x2 - x1)
+        dy = abs(y2 - y1)
+        sx = 1 if x1 < x2 else -1
+        sy = 1 if y1 < y2 else -1
+        err = dx - dy
+        x, y = x1, y1
+        # Pick a middling glyph that reads as a line at any angle.
+        glyph = "·"
+        steps = 0
+        while steps < 200:
+            if 0 <= x < w and 0 <= y < h:
+                grid[y][x] = (glyph, 10, curses.A_DIM)
+            if x == x2 and y == y2:
+                return
+            e2 = 2 * err
+            if e2 > -dy:
+                err -= dy
+                x += sx
+            if e2 < dx:
+                err += dx
+                y += sy
+            steps += 1
 
     def _build_galaxy_lines(self, w, h):
         """Render the galaxy graph as text lines, crypto-bubble-style.

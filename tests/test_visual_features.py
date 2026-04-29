@@ -516,21 +516,21 @@ class TestProcessGalaxy:
 
     def test_bubble_size_scales_with_load(self, monitor):
         monitor._total_mem_kb = 16 * 1024 * 1024  # 16 GB
-        # Idle process: smallest bubble
+        # Idle / faint: smallest bubble (still 9x3 so name fits readably)
         idle = {"agg_cpu": 0, "agg_rss_kb": 1024}
-        assert monitor._galaxy_bubble_size(idle) == (5, 3)
+        assert monitor._galaxy_bubble_size(idle) == (9, 3)
         # Light process
         light = {"agg_cpu": 1.0, "agg_rss_kb": 50 * 1024}
-        assert monitor._galaxy_bubble_size(light) == (7, 3)
+        assert monitor._galaxy_bubble_size(light) == (11, 3)
         # Active process (~10% combined)
         active = {"agg_cpu": 8.0, "agg_rss_kb": 100 * 1024}
-        assert monitor._galaxy_bubble_size(active) == (9, 3)
+        assert monitor._galaxy_bubble_size(active) == (13, 4)
         # Busy process
         busy = {"agg_cpu": 15.0, "agg_rss_kb": 200 * 1024}
-        assert monitor._galaxy_bubble_size(busy) == (11, 4)
+        assert monitor._galaxy_bubble_size(busy) == (15, 5)
         # Heavy process — Chrome on a CPU spike
         heavy = {"agg_cpu": 40.0, "agg_rss_kb": 2 * 1024 * 1024}
-        assert monitor._galaxy_bubble_size(heavy) == (13, 5)
+        assert monitor._galaxy_bubble_size(heavy) == (17, 5)
 
     def test_render_bubble_has_box_drawing_and_name(self, monitor):
         monitor._total_mem_kb = 16 * 1024 * 1024
@@ -577,3 +577,80 @@ class TestProcessGalaxy:
         assert "╯" in joined
         # The heavy process name shows up
         assert "Chrome" in joined
+
+    def test_load_tier_classification(self, monitor):
+        total = 16 * 1024 * 1024
+        assert monitor._galaxy_load_tier(
+            {"agg_cpu": 0, "agg_rss_kb": 0}, total) == 0
+        assert monitor._galaxy_load_tier(
+            {"agg_cpu": 1, "agg_rss_kb": 0}, total) == 1
+        assert monitor._galaxy_load_tier(
+            {"agg_cpu": 8, "agg_rss_kb": 0}, total) == 2
+        assert monitor._galaxy_load_tier(
+            {"agg_cpu": 15, "agg_rss_kb": 0}, total) == 3
+        assert monitor._galaxy_load_tier(
+            {"agg_cpu": 50, "agg_rss_kb": 0}, total) == 4
+
+    def test_vendor_label_known_apps(self, monitor):
+        cases = [
+            ("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+             "google"),
+            ("/Applications/Slack.app/Contents/MacOS/Slack", "slack"),
+            ("/Applications/Discord.app/Contents/MacOS/Discord", "discord"),
+            ("/Applications/Visual Studio Code.app/Contents/MacOS/Code",
+             "vscode"),
+            ("/Applications/Docker.app/Contents/MacOS/Docker Desktop",
+             "docker"),
+            ("/usr/sbin/distnoted", "apple"),
+            ("/usr/bin/zsh", "apple"),
+            ("/Users/alice/some-binary", "unknown"),
+        ]
+        for cmd, expected in cases:
+            assert monitor._galaxy_vendor_label({"command": cmd}) == expected, \
+                f"{cmd} → expected {expected}"
+
+    def test_select_nodes_culls_pure_idle(self, monitor):
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        # Mix: 3 active + 5 dead-idle children of unrelated parents
+        monitor.rows = [
+            {"pid": 1, "ppid": 0, "command": "/Applications/Chrome.app/"
+             "Contents/MacOS/Google Chrome",
+             "cpu": 30.0, "agg_cpu": 30.0,
+             "rss_kb": 100, "agg_rss_kb": 100},
+            {"pid": 2, "ppid": 0, "command": "/Applications/Slack.app/"
+             "Contents/MacOS/Slack",
+             "cpu": 5.0, "agg_cpu": 5.0,
+             "rss_kb": 100, "agg_rss_kb": 100},
+            {"pid": 3, "ppid": 0, "command": "/usr/bin/something",
+             "cpu": 1.0, "agg_cpu": 1.0,
+             "rss_kb": 100, "agg_rss_kb": 100},
+        ] + [
+            {"pid": 100 + i, "ppid": 0, "command": f"/usr/libexec/idle{i}",
+             "cpu": 0.0, "agg_cpu": 0.0, "rss_kb": 0, "agg_rss_kb": 0}
+            for i in range(5)
+        ]
+        nodes = monitor._galaxy_select_nodes()
+        node_pids = {n["pid"] for n in nodes}
+        # Only the three active processes survive
+        assert node_pids == {1, 2, 3}
+        assert monitor._galaxy_hidden_count == 5
+
+    def test_select_nodes_keeps_active_subtree_chain(self, monitor):
+        """A direct parent of an interesting PID is kept even when its
+        own load is zero, so the topology of the active subtree is
+        preserved on the canvas."""
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        monitor.rows = [
+            # zero-load parent — would normally be culled
+            {"pid": 1, "ppid": 0, "command": "/usr/bin/launchd",
+             "cpu": 0.0, "agg_cpu": 0.0, "rss_kb": 0, "agg_rss_kb": 0},
+            # busy child
+            {"pid": 2, "ppid": 1, "command": "/Applications/Chrome.app/"
+             "Contents/MacOS/Google Chrome",
+             "cpu": 30.0, "agg_cpu": 30.0,
+             "rss_kb": 100, "agg_rss_kb": 100},
+        ]
+        nodes = monitor._galaxy_select_nodes()
+        node_pids = {n["pid"] for n in nodes}
+        assert node_pids == {1, 2}, \
+            "parent of an interesting PID should be retained"
