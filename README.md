@@ -289,6 +289,8 @@ lines so you can correlate exactly what the process is doing
 entries are visible without `sudo`; system-private payloads may
 still render as `<private>` without root — that's macOS, not us.
 
+![Per-process Unified Log](screenshots/unified-log.png)
+
 Detail-focus shortcuts: `↑`/`↓` and `PgUp`/`PgDn` scroll the
 buffer, `c` clears, `Esc` kills the subprocess and closes.
 

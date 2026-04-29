@@ -40,7 +40,12 @@ Sectioned menu:
 
 Forensic report for the selected process. Sections include codesign,
 Gatekeeper, YARA disk, YARA memory (root-only), binary-trust
-profile.
+profile, **per-PID metric trend (sparklines)**, **disk I/O bytes**
+(`proc_pid_rusage` / `RUSAGE_INFO_V4`), and **Mach IPC port count**
+(`proc_pidinfo PROC_PIDLISTFILEPORTS`). The TREND section renders
+60 samples of CPU%, RSS, ↓Net, ↑Net as Unicode-block sparklines
+(▁▂▃▄▅▆▇█) so you can see what the process has been doing for the
+last minute, not just right now.
 
 ## Deep Process Triage (`T` or via Process Investigation)
 
@@ -50,7 +55,18 @@ a structured cursor over remediable findings.
 ## Network connections (`N` or via Process Investigation)
 
 List of TCP/UDP endpoints owned by the selected process: state,
-local, remote, foreign DNS. `k` kills the highlighted connection.
+local, remote, foreign DNS. `k` prompts before SIGKILL'ing the
+**owning process** (true per-flow kill on macOS would need
+`pfctl`/`tcpkill` plumbing — currently out of scope).
+
+## Per-process Unified Log (`U`)
+
+Live tail of `log stream --process <pid> --level info --style
+compact` for the selected PID. Surfaces every subsystem / category
+message the process emits to `os_log` — far richer than the bottom
+status string. The Ask overlay (`?`) reads the last 50 lines as
+system context, so the assistant gets specific about what the
+process is *doing*, not just what it *is*.
 
 ## Endpoint Security stream (`E` → Security timeline)
 

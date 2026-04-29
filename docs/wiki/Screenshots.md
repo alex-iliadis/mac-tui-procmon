@@ -14,8 +14,9 @@ chat-overlay variant of the same surface.
 | `sort-dialog.png`             | Sort dialog (`s` key)                              |
 | `forensic-menu.png`           | Process Investigation menu                         |
 | `telemetry-menu.png`          | Live Telemetry menu (`E`)                          |
-| `inspect-view.png`            | Inspect mode (codesign + YARA + trust profile)     |
+| `inspect-view.png`            | Inspect mode (codesign + YARA + trust profile + sparkline TREND + IPC ports) |
 | `triage-view.png`             | Deep process triage (`T`)                          |
+| `unified-log.png`             | Per-process Unified Log stream (`U`) — `log stream --process <pid>` |
 | `alert-config.png`            | Alert thresholds dialog (`Shift+C`)                |
 | `log-overlay.png`             | Debug log overlay (`L`)                            |
 | `ask-claude.png`              | AI chat overlay grounded in current screen         |

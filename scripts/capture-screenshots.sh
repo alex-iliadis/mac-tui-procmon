@@ -45,9 +45,9 @@ CAP_Y1=$(( Y1 + 30 ))
 CAP_H=$(( Y2 - CAP_Y1 ))
 
 if [ "$USE_SUDO" -eq 1 ]; then
-  TUI_CMD="sudo -n /usr/local/sbin/mac-tui-procmon-sudo --skip-preflight"
+  TUI_CMD="sudo -n /usr/local/sbin/mac-tui-procmon-sudo --skip-preflight -i 1"
 else
-  TUI_CMD="/opt/homebrew/bin/python3 $ROOT_DIR/mac_tui_procmon.py --skip-preflight"
+  TUI_CMD="/opt/homebrew/bin/python3 $ROOT_DIR/mac_tui_procmon.py --skip-preflight -i 1"
 fi
 
 osa_run() {
@@ -97,7 +97,9 @@ tell application "Terminal"
   set custom title of selected tab of front window to "mac-tui-procmon"
 end tell
 OSA
-/bin/sleep 4   # let preflight + first refresh settle
+/bin/sleep 12  # 12s + interval=1s lets the per-PID metric ring buffer
+               # accumulate enough samples for the Inspect TREND sparklines
+               # (▁▂▃▄▅▆▇█) to render with real data instead of empty cells.
 
 # Bring Terminal forward before sending keystrokes.
 osa_run 'tell application "Terminal" to activate'
@@ -169,6 +171,16 @@ press "Escape" 0.8
 # [San Francisco/CA]). The CDN edge is correlated with the user's
 # country, so the screenshot is a country leak. Users see the live
 # panel themselves; it doesn't need to ship as a public PNG.
+
+# ── Per-process Unified Log mode (U key) ──────────────────────────────
+# Press U on the selected PID; the panel becomes a live
+# `log stream --process <pid> --style compact` tail. Wait long enough
+# for several lines to scroll in — the panel is most informative when
+# populated. If the selected process is quiet, the capture may show an
+# empty buffer; that's fine, it still demonstrates the surface.
+press "U" 6.0
+shot "unified-log"
+press "Escape" 0.8
 
 # ── Ask Claude overlay ─────────────────────────────────────────────────
 # Open the chat overlay and snap immediately, before the assistant has
