@@ -2360,67 +2360,6 @@ def fmt_rate(bps):
 _SPARK_BLOCKS = "▁▂▃▄▅▆▇█"
 
 
-def _braille_waveform(values, width=60, height=4):
-    """Render a numeric series as `height` rows of Braille glyphs.
-
-    Each Braille cell encodes a 2-wide × 4-tall bit grid (8 dots). We
-    treat one *column* of input as one Braille cell so each cell shows
-    two adjacent samples sharing a column. Within a cell, the 4-tall
-    height is fanned out to (4 × height) sub-rows so a stack of `height`
-    Braille rows yields `height × 4` total vertical resolution.
-
-    Returns a list of `height` strings, each of length `width`.
-    Empty input → list of `height` blank-string rows.
-    """
-    if width <= 0 or height <= 0:
-        return [""] * max(0, height)
-    rows = ["" for _ in range(height)]
-    if not values:
-        return [" " * width for _ in range(height)]
-    # Two samples per Braille cell horizontally; downsample / pad to
-    # exactly width*2 samples.
-    target = width * 2
-    series = list(values)
-    if len(series) > target:
-        # Take the most-recent window.
-        series = series[-target:]
-    elif len(series) < target:
-        series = [0.0] * (target - len(series)) + series
-    peak = max(series) if series else 0.0
-    if peak <= 0:
-        return [" " * width for _ in range(height)]
-    total_levels = height * 4  # 4 vertical dots per row × `height` rows
-    # Convert each sample to an integer level in [0, total_levels].
-    levels = []
-    for v in series:
-        lvl = int((max(0.0, float(v)) / peak) * total_levels)
-        lvl = max(0, min(total_levels, lvl))
-        levels.append(lvl)
-    # Braille left-column dots: 0x40 (bottom-most), 0x04, 0x02, 0x01 (top)
-    # Right-column dots:        0x80,                0x20, 0x10, 0x08
-    LEFT_DOTS = (0x40, 0x04, 0x02, 0x01)
-    RIGHT_DOTS = (0x80, 0x20, 0x10, 0x08)
-    for ri in range(height):
-        # Top row first → invert ri so the highest amplitude lands at top.
-        row_top = (height - ri) * 4  # exclusive upper bound
-        row_bot = row_top - 4        # inclusive lower bound
-        cells = []
-        for ci in range(width):
-            left_lvl = levels[ci * 2]
-            right_lvl = levels[ci * 2 + 1] if (ci * 2 + 1) < len(levels) else 0
-            mask = 0
-            for di in range(4):
-                # absolute height level for this sub-row (inside this row)
-                lvl_threshold = row_bot + di + 1
-                if left_lvl >= lvl_threshold:
-                    mask |= LEFT_DOTS[di]
-                if right_lvl >= lvl_threshold:
-                    mask |= RIGHT_DOTS[di]
-            cells.append(chr(0x2800 + mask))
-        rows[ri] = "".join(cells)
-    return rows
-
-
 def _sparkline(values, width=24):
     """Render an iterable of numeric samples as Unicode-block bars.
 
@@ -3317,32 +3256,6 @@ class ProcMonUI:
         # Snapshot of last-tick metrics for pulse delta computation. Keyed
         # by pid so transient pids fall out of the dict naturally.
         self._pulse_prev = {}  # pid -> {"cpu", "net", "io"}
-        # ── Feature 2: AI Narrator / Guided Spotlight ───────────────
-        # Periodically picks the most-anomalous threshold-exceeding row,
-        # frames it, and renders an LLM-generated one-line caption. Can
-        # also speak it via macOS `say` (gated on speak flag + binary).
-        self._narrator_enabled = False
-        self._narrator_last_tick = 0.0
-        self._narrator_interval = 15.0  # seconds between captions
-        self._narrator_caption = ""
-        self._narrator_target_pid = None
-        self._narrator_target_cmd = ""
-        self._narrator_speak = True
-        self._narrator_worker = None
-        self._narrator_pending = None
-        self._narrator_loading = False
-        self._narrator_seen_pids = {}   # pid -> last_seen_monotonic
-        self._narrator_history = []     # ring of last-spotlighted (pid, caption)
-        self._narrator_history_max = 20
-        self._narrator_speak_lock = threading.Lock()
-        # ── Feature 3: Resource Oscilloscope ────────────────────────
-        # Synchronized stacked Braille waveforms for one PID across all
-        # sampled metrics. Ring buffer in `_metric_history` already holds
-        # the per-PID series — we just extend the metrics dict to cover
-        # disk, GPU, FD, mach-port counts so all 9 lanes have data.
-        self._oscilloscope_mode = False
-        self._oscilloscope_pid = None
-        self._oscilloscope_scroll = 0
         # ── Feature 4: Three-Model Consensus Race ────────────────────
         # While Inspect runs, claude/codex/gemini stream their analyses
         # into three side-by-side lanes. The risk bar fills 33% per
@@ -3384,16 +3297,6 @@ class ProcMonUI:
         self._galaxy_known_pids = set()
         self._galaxy_node_cap = 80
         self._galaxy_iter_step = 0.5  # spring step length
-        # ── Feature 8: Process Lifecycle DVR ────────────────────────
-        # Gantt-style horizontal timeline. Each refresh tick captures a
-        # snapshot of which PIDs were alive; the renderer paints a row
-        # per PID with green blocks for "alive" cells.
-        self._lifecycle_mode = False
-        self._lifecycle_snapshots = collections.deque(maxlen=300)
-        self._lifecycle_cursor = -1   # -1 = live tail
-        self._lifecycle_playing = True
-        self._lifecycle_max_rows = 60
-        self._lifecycle_min_alive_cells = 1
         # Test-only TUI report capture. This is intentionally opt-in so the
         # normal user-facing UI stays unchanged. The harness uses it to export
         # the exact detail-pane buffer for post-run assertions.
@@ -3839,200 +3742,6 @@ class ProcMonUI:
                 new_pulses[pid] = (color_pair_id, frames_remaining - 1)
         self._row_pulses = new_pulses
 
-    # ── Feature 2: AI Narrator / Guided Spotlight ─────────────────────
-
-    def _toggle_narrator_mode(self):
-        """Toggle the narrator on/off (default keybinding: backslash)."""
-        self._narrator_enabled = not self._narrator_enabled
-        if not self._narrator_enabled:
-            self._narrator_caption = ""
-            self._narrator_target_pid = None
-            self._narrator_target_cmd = ""
-        else:
-            # Force first caption on next tick by resetting the timer.
-            self._narrator_last_tick = 0.0
-
-    def _narrator_anomaly_score(self, p):
-        """Score a row's anomaly level (higher = more interesting)."""
-        score = 0.0
-        if self._exceeds_threshold(p):
-            score += 100.0
-        score += float(p.get("agg_cpu", p.get("cpu", 0)) or 0.0)
-        # Memory in GB scaled to single-digit weight
-        rss_kb = p.get("agg_rss_kb", p.get("rss_kb", 0)) or 0
-        score += rss_kb / (1024.0 * 1024.0) * 5.0
-        net_in = max(p.get("agg_net_in", p.get("net_in", 0)) or 0, 0)
-        net_out = max(p.get("agg_net_out", p.get("net_out", 0)) or 0, 0)
-        score += (net_in + net_out) / (1024.0 * 1024.0)
-        # Novelty bonus — pid we haven't seen in the last 60s gets +25
-        last = self._narrator_seen_pids.get(p["pid"])
-        now = time.monotonic()
-        if last is None or now - last > 60.0:
-            score += 25.0
-        # Active pulse → +50 (something just happened)
-        if p["pid"] in self._row_pulses:
-            score += 50.0
-        return score
-
-    def _select_narrator_target(self):
-        """Walk current rows and pick the highest-anomaly-scored process.
-
-        Returns the row dict or None when no candidate is interesting.
-        """
-        if not self.rows:
-            return None
-        best = None
-        best_score = -1.0
-        for r in self.rows:
-            sc = self._narrator_anomaly_score(r)
-            if sc > best_score:
-                best = r
-                best_score = sc
-        # Skip if nothing is even mildly interesting (no spike, no novelty,
-        # no pulse). Threshold 25.0 ≈ "novelty floor" so the narrator only
-        # speaks when something is worth narrating.
-        if best is None or best_score < 25.0:
-            return None
-        return best
-
-    def _maybe_run_narrator(self):
-        """Call this from the run loop; fires a caption every interval."""
-        if not self._narrator_enabled:
-            return
-        if self._narrator_loading:
-            return
-        now = time.monotonic()
-        if now - self._narrator_last_tick < self._narrator_interval:
-            return
-        target = self._select_narrator_target()
-        if not target:
-            return
-        self._narrator_last_tick = now
-        self._narrator_seen_pids[target["pid"]] = now
-        self._narrator_target_pid = target["pid"]
-        cmd = target.get("command", "")
-        self._narrator_target_cmd = cmd.split()[0].rsplit("/", 1)[-1][:32] if cmd else ""
-        self._narrator_loading = True
-        self._narrator_pending = None
-        # Snapshot the metric values now — the worker thread should not
-        # iterate self.rows directly (race against collect_data).
-        snap = {
-            "pid": target["pid"],
-            "cmd": target.get("command", ""),
-            "cpu": target.get("agg_cpu", target.get("cpu", 0)) or 0.0,
-            "rss_mb": (target.get("agg_rss_kb", target.get("rss_kb", 0)) or 0) / 1024.0,
-            "net_in": max(target.get("agg_net_in", target.get("net_in", 0)) or 0, 0),
-            "net_out": max(target.get("agg_net_out", target.get("net_out", 0)) or 0, 0),
-            "ppid": target.get("ppid", 0),
-        }
-        self._narrator_worker = threading.Thread(
-            target=self._narrator_worker_fn, args=(snap,), daemon=True)
-        self._narrator_worker.start()
-
-    def _narrator_worker_fn(self, snap):
-        """Background worker: ask an LLM for a one-line narration."""
-        try:
-            caption = self._narrator_generate_caption(snap)
-        except Exception as e:
-            caption = f"[narrator error: {e}]"
-        if not caption:
-            caption = (
-                f"PID {snap['pid']} ({snap.get('cmd','?')[:30]}) "
-                f"is using {snap['cpu']:.1f}% CPU "
-                f"and {snap['rss_mb']:.0f} MB.")
-        self._narrator_pending = caption
-
-    def _narrator_generate_caption(self, snap):
-        """Run the existing LLM fallback chain to generate a caption.
-
-        Tests stub this method out; we never call real LLMs in tests.
-        """
-        if getattr(self, "_test_mode", False):
-            return (
-                f"PID {snap['pid']} ({snap.get('cmd','?')[:30]}) "
-                f"is the most active process this cycle.")
-        prompt = (
-            "You are an expert macOS process narrator. In ONE SHORT "
-            "sentence (max 25 words), narrate why this process deserves "
-            "attention right now. Be specific to the metrics; do NOT "
-            "speculate beyond them. No greetings, no preamble, no "
-            "trailing period necessary."
-        )
-        body = (
-            f"PID: {snap['pid']}\n"
-            f"command: {snap.get('cmd','')}\n"
-            f"cpu: {snap['cpu']:.1f}%\n"
-            f"memory: {snap['rss_mb']:.0f} MB\n"
-            f"net_in: {snap['net_in']:.0f} B/s\n"
-            f"net_out: {snap['net_out']:.0f} B/s\n"
-            f"ppid: {snap.get('ppid',0)}\n"
-        )
-        env = {
-            **os.environ,
-            "PATH": _USER_TOOL_PATH,
-            "HOME": _EFFECTIVE_HOME,
-        }
-        sudo_user = os.environ.get("SUDO_USER")
-        if sudo_user:
-            env["USER"] = sudo_user
-            env["LOGNAME"] = sudo_user
-        for label, argv in (
-            ("claude", ["claude", "-p", "--no-session-persistence",
-                        "--dangerously-skip-permissions", prompt]),
-            ("codex", ["codex", "exec",
-                        "--dangerously-bypass-approvals-and-sandbox",
-                        "--color", "never", prompt]),
-            ("gemini", ["gemini", "-p", prompt, "-y"]),
-        ):
-            ok, text = self._run_assistant_attempt(
-                argv, body, env, 30, label)
-            if ok:
-                return text.strip().split("\n")[0][:240]
-        return ""
-
-    def _poll_narrator_result(self):
-        """Pick up narrator-worker output. Returns True on state change."""
-        if self._narrator_pending is None:
-            return False
-        caption = self._narrator_pending
-        self._narrator_pending = None
-        self._narrator_loading = False
-        if not self._narrator_enabled:
-            return False
-        self._narrator_caption = caption
-        self._narrator_history.append(
-            (self._narrator_target_pid, caption))
-        if len(self._narrator_history) > self._narrator_history_max:
-            self._narrator_history.pop(0)
-        if self._narrator_speak:
-            self._narrator_speak_async(caption)
-        return True
-
-    def _narrator_speak_async(self, caption):
-        """Spawn `say` to speak the caption. Macos-only, gated on shutil."""
-        if not caption:
-            return
-        try:
-            import shutil
-            say_bin = shutil.which("say")
-        except Exception:
-            say_bin = None
-        if not say_bin:
-            return
-
-        def _do_speak():
-            with self._narrator_speak_lock:
-                try:
-                    subprocess.Popen(
-                        [say_bin, "-v", "Samantha", caption],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-                except Exception:
-                    pass
-
-        threading.Thread(target=_do_speak, daemon=True).start()
-
     def _secondary_sort_key(self):
         """Return the sort key for the user-selected sort mode."""
         if self.sort_mode == SORT_CPU:
@@ -4203,13 +3912,7 @@ class ProcMonUI:
             for p in all_procs:
                 pid = p["pid"]
                 hist = self._metric_history.setdefault(pid, {})
-                # Feature 3: Oscilloscope — extend metric set to cover
-                # disk, GPU, FD count, and mach-port count so the full
-                # waveform stack has data. Older code that only reads
-                # ("cpu", "rss_kb", "net_in", "net_out") still works.
-                for k in ("cpu", "rss_kb", "net_in", "net_out",
-                          "disk_in", "disk_out", "gpu_pct",
-                          "fds", "mach_ports"):
+                for k in ("cpu", "rss_kb", "net_in", "net_out"):
                     dq = hist.get(k)
                     if dq is None:
                         dq = collections.deque(
@@ -4218,9 +3921,8 @@ class ProcMonUI:
                     val = p.get(k, 0)
                     if val is None:
                         val = 0
-                    # Rates / counts can be -1 ("no sample yet"); coerce.
-                    if k in ("net_in", "net_out", "disk_in", "disk_out",
-                              "fds", "mach_ports") and val < 0:
+                    # Rates can be -1 ("no sample yet"); coerce.
+                    if k in ("net_in", "net_out") and val < 0:
                         val = 0
                     dq.append(float(max(0.0, float(val))))
                 self._metric_history_seen[pid] = seen_now
@@ -4273,14 +3975,6 @@ class ProcMonUI:
         # the row renderer.
         try:
             self._update_row_pulses(all_procs)
-        except Exception:
-            pass
-
-        # Feature 8: Process Lifecycle DVR — snapshot the live PID set so
-        # the DVR view can render a Gantt timeline. Metadata captures
-        # the command name so labels survive process exits.
-        try:
-            self._capture_lifecycle_snapshot(all_procs)
         except Exception:
             pass
 
@@ -4398,30 +4092,11 @@ class ProcMonUI:
             return
 
         # ── Compute detail box content and height ──
-        if self._lifecycle_mode:
-            detail_all_lines = self._build_lifecycle_lines(w, h)
-            detail_title = (f"Process Lifecycle DVR — "
-                             f"{len(self._lifecycle_snapshots)} snapshots")
-            max_detail_h = max(10, (h - y) * 4 // 5)
-            detail_h = min(len(detail_all_lines) + 2, max_detail_h)
-        elif self._galaxy_mode:
+        if self._galaxy_mode:
             detail_all_lines = self._build_galaxy_lines(w, h)
             detail_title = (f"Process Galaxy — {len(self._galaxy_positions)} "
                              f"nodes")
             max_detail_h = max(10, (h - y) * 4 // 5)
-            detail_h = min(len(detail_all_lines) + 2, max_detail_h)
-        elif self._oscilloscope_mode and self._oscilloscope_pid is not None:
-            detail_all_lines = self._build_oscilloscope_lines(
-                self._oscilloscope_pid, w)
-            sel_cmd = ""
-            for r in self.rows:
-                if r["pid"] == self._oscilloscope_pid:
-                    sel_cmd = r.get("command", "").split()[0].rsplit(
-                        "/", 1)[-1][:24]
-                    break
-            detail_title = (f"Oscilloscope — {sel_cmd} "
-                            f"(PID {self._oscilloscope_pid})")
-            max_detail_h = max(10, (h - y) * 3 // 4)
             detail_h = min(len(detail_all_lines) + 2, max_detail_h)
         elif self._inspect_mode:
             if self._inspect_lines and not self._consensus_running:
@@ -4667,14 +4342,6 @@ class ProcMonUI:
             # Hidden process marker
             if r["pid"] in self._hidden_pids and idx != self.selected:
                 self._put(y, 0, "!", curses.color_pair(5) | curses.A_BOLD)
-            # Feature 2: AI Narrator spotlight marker on the active target.
-            if (self._narrator_enabled
-                    and self._narrator_target_pid is not None
-                    and r["pid"] == self._narrator_target_pid):
-                # ► prefix in narrator color (light green) so the eye
-                # tracks it during a screencast.
-                self._put(y, 0, "▶",
-                          curses.color_pair(11) | curses.A_BOLD)
             y += 1
 
         # ── Scroll indicator ──
@@ -4709,20 +4376,6 @@ class ProcMonUI:
                                       detail_all_lines, scroll)
         self._render_detail(detail_y, w, detail_all_lines, detail_title,
                             scroll, self._detail_focus, sel_line)
-
-        # Feature 2: Narrator caption banner. Renders one line just above
-        # the shortcut bar when the narrator is on AND a caption exists.
-        if self._narrator_enabled and (self._narrator_caption
-                                        or self._narrator_loading):
-            cy = h - 2
-            if self._narrator_loading:
-                banner = " [Narrator] thinking…"
-            else:
-                pid_str = (f" PID {self._narrator_target_pid}: "
-                           if self._narrator_target_pid else " ")
-                banner = f" [Narrator]{pid_str}{self._narrator_caption}"
-            self._put(cy, 0, banner.ljust(w)[:w],
-                       curses.color_pair(11) | curses.A_BOLD)
 
         # ── Shortcut bar (mc-style) ──
         self._render_shortcut_bar(h, w)
@@ -5115,6 +4768,8 @@ class ProcMonUI:
         elif self._net_mode:
             shortcuts = [
                 ("Tab", "Conns"),
+                ("g", "Orbit"),
+                ("k", "Kill proc"),
                 ("?", "Ask"),
                 ("N", "Close"),
                 ("Esc", "Back"),
@@ -5126,14 +4781,14 @@ class ProcMonUI:
                 ("F", "Process"),
                 ("N", "Net"),
                 ("T", "Triage"),
-                ("o", "Oscope"),
                 ("G", "Galaxy"),
-                ("D", "DVR"),
                 ("r", "Replay"),
                 ("?", "Ask"),
-                ("\\", "Narrator"),
+                ("U", "PIDlog"),
                 ("L", "Log"),
                 ("f", "Filter"),
+                ("C", "Config"),
+                ("PgU/D", "Page"),
                 ("k", "Kill"),
                 ("q", "Quit"),
             ]
@@ -5336,26 +4991,6 @@ class ProcMonUI:
                 elif key == ord("q"):
                     return False
                 return True
-            elif self._lifecycle_mode:
-                # Feature 8: Lifecycle DVR scrubbing.
-                if key == curses.KEY_LEFT:
-                    self._lifecycle_step(-1)
-                elif key == curses.KEY_RIGHT:
-                    self._lifecycle_step(1)
-                elif key == curses.KEY_PPAGE:
-                    self._lifecycle_step(-10)
-                elif key == curses.KEY_NPAGE:
-                    self._lifecycle_step(10)
-                elif key == ord(" "):
-                    self._lifecycle_jump_live()
-                elif key == ord("\t"):
-                    self._detail_focus = False
-                elif key == 27:
-                    self._lifecycle_mode = False
-                    self._detail_focus = False
-                elif key == ord("q"):
-                    return False
-                return True
             else:
                 # Net mode detail focus
                 n = len(self._net_entries) or 1
@@ -5436,29 +5071,21 @@ class ProcMonUI:
             self._toggle_process_triage_mode()
         elif key == ord("U"):
             self._toggle_unified_log_mode()
-        elif key == ord("o"):
-            self._toggle_oscilloscope_mode()
         elif key == ord("G"):
             self._toggle_galaxy_mode()
-        elif key == ord("D"):
-            self._toggle_lifecycle_mode()
         elif key == ord("r"):
             # Feature 5: enter Attack Chain Replay if a buffer was captured.
             if self._replay_mode:
                 self._exit_replay_mode()
             else:
                 self._start_replay_mode()
-        elif key == ord("\\"):
-            self._toggle_narrator_mode()
         elif key == ord("\t"):
             if (self._inspect_mode or self._net_mode
                     or self._events_mode
                     or self._audit_mode or self._traffic_mode
                     or self._unified_log_mode
-                    or self._oscilloscope_mode
                     or self._replay_mode
-                    or self._galaxy_mode
-                    or self._lifecycle_mode):
+                    or self._galaxy_mode):
                 self._detail_focus = True
         elif key == ord("C"):  # Shift+C — alert config
             self._prompt_config()
@@ -5467,18 +5094,11 @@ class ProcMonUI:
         elif key == ord("k"):
             self._kill_selected()
         elif key == 27:  # Escape
-            if self._lifecycle_mode:
-                self._lifecycle_mode = False
-                self._detail_focus = False
-            elif self._galaxy_mode:
+            if self._galaxy_mode:
                 self._galaxy_mode = False
                 self._detail_focus = False
             elif self._replay_mode:
                 self._exit_replay_mode()
-            elif self._oscilloscope_mode:
-                self._oscilloscope_mode = False
-                self._oscilloscope_pid = None
-                self._detail_focus = False
             elif self._inspect_mode:
                 self._inspect_mode = False
                 self._detail_focus = False
@@ -5791,133 +5411,6 @@ class ProcMonUI:
             if steps > 4 * (w + h):  # safety guard
                 break
 
-    # ── Feature 8: Process Lifecycle DVR ───────────────────────────────
-
-    def _capture_lifecycle_snapshot(self, all_procs):
-        """Append a (timestamp, pid_set, metadata) entry to the buffer."""
-        ts = time.monotonic()
-        pid_set = set()
-        meta = {}
-        for p in all_procs:
-            pid = p.get("pid")
-            if pid is None:
-                continue
-            pid_set.add(pid)
-            cmd = p.get("command", "") or ""
-            meta[pid] = (cmd.split()[0].rsplit("/", 1)[-1][:24]
-                          if cmd else str(pid))
-        self._lifecycle_snapshots.append((ts, pid_set, meta))
-
-    def _toggle_lifecycle_mode(self):
-        """Toggle the Gantt-style PID timeline view (key: D)."""
-        if self._lifecycle_mode:
-            self._lifecycle_mode = False
-            self._detail_focus = False
-            return
-        self._lifecycle_mode = True
-        # Mutual exclusion with other modes
-        self._inspect_mode = False
-        self._net_mode = False
-        self._audit_mode = False
-        self._oscilloscope_mode = False
-        if getattr(self, "_events_mode", False):
-            self._stop_events_stream()
-            self._events_mode = False
-        self._galaxy_mode = False
-        self._lifecycle_cursor = -1
-        self._lifecycle_playing = True
-        self._detail_focus = True
-
-    def _lifecycle_select_pids(self, snapshots):
-        """Pick PIDs that were alive in at least N snapshots so the row
-        list doesn't explode. Sorted by time-of-first-appearance.
-        """
-        first_seen = {}
-        alive_count = {}
-        for idx, (_ts, pid_set, _meta) in enumerate(snapshots):
-            for pid in pid_set:
-                if pid not in first_seen:
-                    first_seen[pid] = idx
-                alive_count[pid] = alive_count.get(pid, 0) + 1
-        candidates = [
-            pid for pid, c in alive_count.items()
-            if c >= self._lifecycle_min_alive_cells
-        ]
-        candidates.sort(key=lambda p: (first_seen.get(p, 0), p))
-        return candidates[:self._lifecycle_max_rows]
-
-    def _build_lifecycle_lines(self, w, h):
-        """Build display lines for the lifecycle DVR Gantt view."""
-        snapshots = list(self._lifecycle_snapshots)
-        if not snapshots:
-            return [" No lifecycle snapshots yet — wait for the next refresh."]
-        n = len(snapshots)
-        # Right-align the timeline so most-recent is at the right edge.
-        bar_w = max(20, w - 32)
-        # Window the snapshots to bar_w cells.
-        start = max(0, n - bar_w)
-        window = snapshots[start:]
-        cursor_window_idx = (n - 1 if self._lifecycle_cursor < 0
-                              else max(0, min(n - 1, self._lifecycle_cursor)) - start)
-        if cursor_window_idx < 0 or cursor_window_idx >= len(window):
-            cursor_window_idx = len(window) - 1
-        pids = self._lifecycle_select_pids(window)
-        lines = []
-        # Header line
-        playing = "▶ live" if self._lifecycle_cursor < 0 else "⏸ frozen"
-        lines.append(
-            f" Lifecycle DVR  [{playing}]  buffer={n}  rows={len(pids)}")
-        lines.append("")
-        max_rows = max(1, h - 8)
-        pids = pids[:max_rows]
-        # Row per pid: "label  bar"
-        # Build a metadata lookup from the most recent snapshot that has it.
-        meta_lookup = {}
-        for _ts, _pids, m in reversed(window):
-            for pid, label in m.items():
-                meta_lookup.setdefault(pid, label)
-        for pid in pids:
-            label = meta_lookup.get(pid, str(pid))
-            cells = []
-            for i, (_ts, pid_set, _m) in enumerate(window):
-                if pid in pid_set:
-                    cells.append("█")
-                else:
-                    # Faint dim if the pid was alive in the prior cell
-                    # (just exited)
-                    cells.append(" ")
-            # Cursor marker — replace cell with overline when frozen
-            if 0 <= cursor_window_idx < len(cells):
-                if cells[cursor_window_idx] == "█":
-                    cells[cursor_window_idx] = "▓"
-                else:
-                    cells[cursor_window_idx] = "│"
-            row = f" {label[:18]:<18} | {''.join(cells)}"
-            lines.append(row)
-        # Bottom timeline marker
-        lines.append("")
-        marker_line = list(" " * len(window))
-        if 0 <= cursor_window_idx < len(marker_line):
-            marker_line[cursor_window_idx] = "▲"
-        lines.append(" " + " " * 18 + "   " + "".join(marker_line))
-        return lines
-
-    def _lifecycle_step(self, delta):
-        """Step the cursor; -1 means live tail."""
-        n = len(self._lifecycle_snapshots)
-        if n == 0:
-            return
-        if self._lifecycle_cursor < 0:
-            self._lifecycle_cursor = n - 1
-        self._lifecycle_cursor = max(0, min(n - 1,
-                                             self._lifecycle_cursor + delta))
-        # Frozen → not playing
-        self._lifecycle_playing = False
-
-    def _lifecycle_jump_live(self):
-        self._lifecycle_cursor = -1
-        self._lifecycle_playing = True
-
     # ── Feature 7: Process Galaxy ──────────────────────────────────────
 
     def _toggle_galaxy_mode(self):
@@ -5931,7 +5424,6 @@ class ProcMonUI:
         self._inspect_mode = False
         self._net_mode = False
         self._audit_mode = False
-        self._oscilloscope_mode = False
         if getattr(self, "_events_mode", False):
             self._stop_events_stream()
             self._events_mode = False
@@ -9137,66 +8629,6 @@ class ProcMonUI:
         finally:
             self._inspect_phase = ""
 
-    # ── Feature 3: Resource Oscilloscope ───────────────────────────────
-
-    _OSCILLOSCOPE_LANES = (
-        ("cpu", "CPU %", "%.1f"),
-        ("rss_kb", "RSS MB", "%.0f"),  # special: kb→mb in render
-        ("net_in", "Net IN B/s", "%.0f"),
-        ("net_out", "Net OUT B/s", "%.0f"),
-        ("disk_in", "Disk R B/s", "%.0f"),
-        ("disk_out", "Disk W B/s", "%.0f"),
-        ("gpu_pct", "GPU %", "%.1f"),
-        ("fds", "FDs", "%.0f"),
-        ("mach_ports", "Mach ports", "%.0f"),
-    )
-
-    def _toggle_oscilloscope_mode(self):
-        """Toggle the multi-metric Braille oscilloscope (default key: o)."""
-        if self._oscilloscope_mode:
-            self._oscilloscope_mode = False
-            self._oscilloscope_pid = None
-            self._detail_focus = False
-            return
-        if not self.rows:
-            return
-        sel = self.rows[self.selected]
-        self._oscilloscope_pid = sel["pid"]
-        self._oscilloscope_scroll = 0
-        self._oscilloscope_mode = True
-        # Other modes are mutually exclusive — close them so we own the pane.
-        self._inspect_mode = False
-        self._net_mode = False
-        self._audit_mode = False
-        if getattr(self, "_events_mode", False):
-            self._stop_events_stream()
-            self._events_mode = False
-        self._detail_focus = True
-
-    def _build_oscilloscope_lines(self, pid, width):
-        """Build the rendered text lines for the oscilloscope view."""
-        lines = []
-        with self._metric_history_lock:
-            hist = dict(self._metric_history.get(pid) or {})
-            # Make our own snapshot lists so we can render without lock.
-            series = {k: list(v) for k, v in hist.items()}
-        lane_w = max(20, min(60, width - 22))
-        for key, label, fmt in self._OSCILLOSCOPE_LANES:
-            values = series.get(key) or []
-            if key == "rss_kb":
-                values = [v / 1024.0 for v in values]  # kb → MB
-            peak = max(values) if values else 0.0
-            try:
-                peak_str = fmt % peak
-            except Exception:
-                peak_str = str(int(peak))
-            header = f"{label:<13} peak {peak_str}"
-            lines.append(header)
-            waveform = _braille_waveform(values, width=lane_w, height=4)
-            lines.extend(waveform)
-            lines.append("")  # blank separator
-        return lines
-
     def _toggle_inspect_mode(self):
         """Toggle process inspect mode (I key)."""
         if self._inspect_mode:
@@ -10984,14 +10416,6 @@ class ProcMonUI:
             if self._audit_pending is not None:
                 if self._poll_audit_result():
                     self.render()
-            # Feature 2: AI Narrator — runs every interval; non-blocking.
-            try:
-                self._maybe_run_narrator()
-                if self._narrator_pending is not None:
-                    if self._poll_narrator_result():
-                        self.render()
-            except Exception:
-                pass
             # Feature 5: Attack Chain Replay — auto-advance when playing.
             try:
                 if self._replay_advance_if_playing():

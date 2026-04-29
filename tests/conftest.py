@@ -207,26 +207,6 @@ def monitor():
     }
     mon._pulse_frames = 4
     mon._pulse_prev = {}
-    # Feature 2: AI Narrator
-    import threading as _t_narrator
-    mon._narrator_enabled = False
-    mon._narrator_last_tick = 0.0
-    mon._narrator_interval = 15.0
-    mon._narrator_caption = ""
-    mon._narrator_target_pid = None
-    mon._narrator_target_cmd = ""
-    mon._narrator_speak = True
-    mon._narrator_worker = None
-    mon._narrator_pending = None
-    mon._narrator_loading = False
-    mon._narrator_seen_pids = {}
-    mon._narrator_history = []
-    mon._narrator_history_max = 20
-    mon._narrator_speak_lock = _t_narrator.Lock()
-    # Feature 3: Resource Oscilloscope
-    mon._oscilloscope_mode = False
-    mon._oscilloscope_pid = None
-    mon._oscilloscope_scroll = 0
     # Feature 4: Three-Model Consensus Race
     import threading as _t_consensus
     mon._consensus_lanes = {"claude": [], "codex": [], "gemini": []}
@@ -255,13 +235,5 @@ def monitor():
     mon._galaxy_known_pids = set()
     mon._galaxy_node_cap = 80
     mon._galaxy_iter_step = 0.5
-    # Feature 8: Process Lifecycle DVR
-    import collections as _c_lifecycle
-    mon._lifecycle_mode = False
-    mon._lifecycle_snapshots = _c_lifecycle.deque(maxlen=300)
-    mon._lifecycle_cursor = -1
-    mon._lifecycle_playing = True
-    mon._lifecycle_max_rows = 60
-    mon._lifecycle_min_alive_cells = 1
     mon._test_select_pid = 0
     return mon
