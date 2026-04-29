@@ -1957,9 +1957,13 @@ def _codesign_structured(exe_path):
     """
     if not exe_path:
         return {}
+    # 30s covers cold-cache reads of large signed bundles (Chrome, Xcode,
+    # some Electron apps). codesign -dvvv doesn't do trust evaluation,
+    # so the long-tail is purely the on-disk binary read; SSDs hit it
+    # in <1s warm but can take 10–20s cold on a quiet machine.
     rc, out, err = _run_cmd_short(
         ["codesign", "-dvvv", "-r-", "--entitlements", ":-", exe_path],
-        timeout=10,
+        timeout=30,
     )
     if rc is None:
         return {}
@@ -6998,19 +7002,25 @@ class ProcMonUI:
             except (FileNotFoundError, OSError) as e:
                 return f"[error: {e}]"
 
-        # 1. Code signature verification
+        # 1. Code signature verification (--deep recurses into every
+        # nested binary in the bundle, so for Chrome / Electron apps with
+        # hundreds of helpers this can take 30–50s on a cold cache. 60s
+        # covers the worst case; 10s was timing out on first inspect.)
         artifacts["codesign_verify"] = _run_cmd(
-            ["codesign", "-vvv", "--deep", exe_path])
+            ["codesign", "-vvv", "--deep", exe_path], timeout=60)
 
         # 2. Entitlements
         artifacts["entitlements"] = _run_cmd(
             ["codesign", "-d", "--entitlements", ":-", exe_path])
 
-        # 3. Linked dylibs
-        artifacts["dylibs"] = _run_cmd(["otool", "-L", exe_path])
+        # 3. Linked dylibs (otool walks the LC_LOAD_DYLIB chain — fast
+        # for normal binaries, slow for Chrome which links a lot)
+        artifacts["dylibs"] = _run_cmd(["otool", "-L", exe_path], timeout=20)
 
-        # 4. Binary hash
-        artifacts["sha256"] = _run_cmd(["shasum", "-a", "256", exe_path])
+        # 4. Binary hash (large binaries — Chrome is ~200 MB — can take
+        # 10–20s for shasum to compute on cold cache)
+        artifacts["sha256"] = _run_cmd(
+            ["shasum", "-a", "256", exe_path], timeout=30)
 
         # 5. All open files (not just network)
         artifacts["lsof"] = _run_cmd(["lsof", "-p", str(pid)], timeout=15)
