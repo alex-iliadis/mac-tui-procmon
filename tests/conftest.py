@@ -159,6 +159,18 @@ def monitor():
     mon._events_lock = threading.Lock()
     mon._events_max = 500
     mon._events_awaiting_summary = False
+    # GPU / Metal per-process utilization
+    import threading as _t_gpu
+    mon._gpu_supported = False
+    mon._gpu_supported_probed = False
+    mon._gpu_samples = {}
+    mon._gpu_samples_lock = _t_gpu.Lock()
+    mon._gpu_worker = None
+    mon._gpu_pending = None
+    mon._gpu_loading = False
+    mon._gpu_status = ""
+    mon._gpu_last_sample_ts = 0.0
+    mon._gpu_sample_interval = 5.0
     # Unified Logging per-process stream
     import collections as _c_unified
     import threading as _t_unified

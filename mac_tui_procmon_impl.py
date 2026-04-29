@@ -3157,6 +3157,23 @@ class ProcMonUI:
         # Two-stage exit: first Esc stops the stream and triggers an LLM
         # summary of the captured events; a second Esc actually closes.
         self._events_awaiting_summary = False
+        # ── GPU / Metal per-process utilization ───────────────────────
+        # `powermetrics --samplers tasks --show-process-gpu` exposes
+        # per-PID gputime_ms_per_s in its JSON output, but it requires
+        # root. We probe lazily — _gpu_supported becomes True only if we
+        # see root + a working `powermetrics` binary. Otherwise we leave
+        # it disabled and skip rendering the GPU% column entirely.
+        self._gpu_supported = False
+        self._gpu_supported_probed = False
+        self._gpu_samples = {}        # pid -> gpu_pct (0..100, None=unknown)
+        self._gpu_samples_lock = threading.Lock()
+        self._gpu_worker = None       # threading.Thread
+        self._gpu_pending = None      # latest sample dict from worker
+        self._gpu_loading = False
+        self._gpu_status = ""         # "" | "needs root" | "unsupported"
+        self._gpu_last_sample_ts = 0.0
+        self._gpu_sample_interval = 5.0  # seconds between powermetrics runs
+
         # ── Unified Logging per-process stream ────────────────────────
         # Wraps `log stream --process <pid>` so the user can watch the
         # native macOS unified-log feed for a single process. No sudo
@@ -3629,6 +3646,18 @@ class ProcMonUI:
         all_procs = get_all_processes()
         self._compute_cpu_deltas(all_procs)
 
+        # Probe + (re)kick the GPU sampler if applicable. The probe is
+        # idempotent and costs essentially nothing after the first call;
+        # the actual powermetrics subprocess is only spawned at most once
+        # per _gpu_sample_interval seconds and runs in a background thread
+        # so it can't stall the refresh.
+        try:
+            self._probe_gpu_supported()
+            self._maybe_start_gpu_sampler()
+            self._poll_gpu_result()
+        except Exception:
+            pass
+
         # Compute net rates first so they're available for tree aggregation
         net_snap = get_net_snapshot()
         now = time.monotonic()
@@ -3657,6 +3686,11 @@ class ProcMonUI:
         self.prev_time = now
 
         # Attach net rates and cumulative bytes before tree building
+        # (and per-PID GPU% from the most recent powermetrics sample).
+        gpu_snap = {}
+        if self._gpu_supported:
+            with self._gpu_samples_lock:
+                gpu_snap = dict(self._gpu_samples)
         for p in all_procs:
             rates = self.net_rates.get(p["pid"])
             p["net_in"] = rates[0] if rates else -1
@@ -3664,6 +3698,7 @@ class ProcMonUI:
             snap = net_snap.get(p["pid"])
             p["bytes_in"] = snap[0] if snap else 0
             p["bytes_out"] = snap[1] if snap else 0
+            p["gpu_pct"] = gpu_snap.get(p["pid"])
 
         # Per-process disk I/O — sample cumulative bytes via libproc rusage,
         # then derive a B/s rate by diffing against the prior snapshot. Same
@@ -4259,6 +4294,9 @@ class ProcMonUI:
         mem_line = f"CPU: {r['cpu']:.1f}%   MEM: {fmt_mem(r['rss_kb'])} ({r['rss_kb']:,} KB)"
         if has_ch:
             mem_line += f"  [group: CPU {agg_cpu:.1f}%  MEM {fmt_mem(agg_mem)}]"
+        gpu_pct = r.get("gpu_pct")
+        if gpu_pct is not None:
+            mem_line += f"   GPU: {gpu_pct:.1f}%"
 
         net_in = r.get("net_in", -1)
         net_out = r.get("net_out", -1)
@@ -6400,6 +6438,163 @@ class ProcMonUI:
         self._unified_log_proc = None
         self._unified_log_loading = False
 
+    # ── GPU / Metal per-process utilization ────────────────────────────
+
+    def _probe_gpu_supported(self):
+        """Decide whether per-PID GPU sampling is feasible on this run.
+
+        We need both root (powermetrics requires it) AND the
+        `powermetrics` binary on PATH. If either is missing we set
+        _gpu_supported=False and never spawn the sampler — the GPU%
+        column simply doesn't render.
+        """
+        if self._gpu_supported_probed:
+            return
+        self._gpu_supported_probed = True
+        if os.geteuid() != 0:
+            self._gpu_supported = False
+            self._gpu_status = "needs root"
+            return
+        try:
+            pm = shutil.which("powermetrics", path=_USER_TOOL_PATH) or \
+                shutil.which("powermetrics")
+        except Exception:
+            pm = None
+        if not pm:
+            self._gpu_supported = False
+            self._gpu_status = "unsupported"
+            return
+        self._gpu_supported = True
+        self._gpu_status = ""
+
+    def _maybe_start_gpu_sampler(self):
+        """Kick the background powermetrics sampler if the gate is open."""
+        if not self._gpu_supported:
+            return
+        if self._gpu_worker and self._gpu_worker.is_alive():
+            return
+        now = time.monotonic()
+        if (now - self._gpu_last_sample_ts) < self._gpu_sample_interval:
+            return
+        self._gpu_last_sample_ts = now
+        self._gpu_loading = True
+        self._gpu_worker = threading.Thread(
+            target=self._gpu_sampler_worker, daemon=True)
+        self._gpu_worker.start()
+
+    def _gpu_sampler_worker(self):
+        """Run a single powermetrics --samplers tasks pass and parse JSON.
+
+        The sampler writes a 1-second window of per-task GPU activity in
+        plist/JSON form. We capture the JSON via --format plist | plutil
+        is unreliable; we use --format json directly. Failures degrade
+        silently (most likely because the kernel revoked our access).
+        """
+        env = {**os.environ,
+               "PATH": _USER_TOOL_PATH,
+               "HOME": _EFFECTIVE_HOME}
+        argv = [
+            "powermetrics",
+            "--samplers", "tasks",
+            "--show-process-gpu",
+            "-i", "1000",
+            "-n", "1",
+            "--format", "json",
+        ]
+        try:
+            proc = subprocess.Popen(
+                argv,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+            )
+            try:
+                out, _err = proc.communicate(timeout=8)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+                self._gpu_pending = {}
+                self._gpu_loading = False
+                return
+        except (FileNotFoundError, OSError):
+            self._gpu_supported = False
+            self._gpu_pending = {}
+            self._gpu_loading = False
+            return
+        samples = self._parse_powermetrics_gpu_json(out)
+        self._gpu_pending = samples
+        self._gpu_loading = False
+
+    @staticmethod
+    def _parse_powermetrics_gpu_json(blob):
+        """Parse powermetrics JSON output into pid -> gpu_pct (0..100).
+
+        powermetrics in --format json mode emits one self-contained JSON
+        object per sample window. The 'tasks' array contains per-process
+        entries with 'pid' and (when --show-process-gpu is on) a
+        'gputime_ms_per_s' field that we treat as 'GPU activity ms in the
+        last 1000 ms', i.e. essentially a GPU% value already.
+
+        Robust to: empty input, missing tasks key, missing pid, type
+        coercion failures.
+        """
+        if not blob:
+            return {}
+        try:
+            text = (blob.decode("utf-8", errors="replace")
+                    if isinstance(blob, (bytes, bytearray)) else blob)
+        except Exception:
+            return {}
+        # powermetrics may emit multiple JSON docs concatenated for -n>1.
+        # We requested -n 1, but be permissive and accept the first
+        # parseable doc.
+        text = text.strip()
+        if not text:
+            return {}
+        try:
+            data = _json.loads(text)
+        except Exception:
+            # Fall back to slicing off everything after the first
+            # top-level '}' — works for the common single-sample case.
+            try:
+                end = text.rfind("}")
+                if end > 0:
+                    data = _json.loads(text[:end + 1])
+                else:
+                    return {}
+            except Exception:
+                return {}
+        tasks = data.get("tasks") or []
+        out = {}
+        for t in tasks:
+            try:
+                pid = int(t.get("pid", -1))
+            except (TypeError, ValueError):
+                continue
+            if pid <= 0:
+                continue
+            ms = t.get("gputime_ms_per_s")
+            if ms is None:
+                ms = t.get("gputime_ms_per_s_total")
+            if ms is None:
+                continue
+            try:
+                pct = float(ms) / 10.0  # ms in 1000 ms → /10 for %
+            except (TypeError, ValueError):
+                continue
+            pct = max(0.0, min(100.0, pct))
+            out[pid] = pct
+        return out
+
+    def _poll_gpu_result(self):
+        """If a sampler pass completed, swap its results into _gpu_samples."""
+        if self._gpu_pending is None:
+            return False
+        with self._gpu_samples_lock:
+            self._gpu_samples = self._gpu_pending or {}
+        self._gpu_pending = None
+        return True
+
     # ── Traffic Inspector (experimental mitmproxy wrapper) ────────────
 
     _MITM_SHIM = (
@@ -8439,6 +8634,9 @@ class ProcMonUI:
                 disk_total = (
                     f"\n  disk_io_total: read {dbi:,} B / "
                     f"written {dbo:,} B")
+            gpu_pct = r.get("gpu_pct")
+            gpu_line = (f"\n  gpu: {gpu_pct:.1f}%"
+                        if gpu_pct is not None else "")
             parts.append(
                 f"  command: {r['command']}\n"
                 f"  ppid: {r.get('ppid')}\n"
@@ -8446,7 +8644,7 @@ class ProcMonUI:
                 f"  memory: {r.get('rss_kb', 0)} KB\n"
                 f"  threads: {r.get('threads', 0)}\n"
                 f"  fds: {r.get('fds', '?')}"
-                f"{disk_line}{disk_total}")
+                f"{gpu_line}{disk_line}{disk_total}")
         else:
             label = "Process list"
             parts.append("The user is looking at the main process list.")

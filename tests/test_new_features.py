@@ -8,6 +8,7 @@ import ctypes
 import json
 import os
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -759,3 +760,165 @@ class TestUnifiedLogMode:
             monitor._toggle_unified_log_mode()
         snap = list(monitor._unified_log_lines)
         assert any("failed to start" in l for l in snap)
+
+
+# ── 8. GPU per-process utilization ───────────────────────────────────────
+
+
+SAMPLE_POWERMETRICS_JSON = b"""{
+  "tasks": [
+    {"pid": 100, "name": "renderer", "gputime_ms_per_s": 250.0},
+    {"pid": 200, "name": "worker", "gputime_ms_per_s": 50.0},
+    {"pid": 300, "name": "no_gpu", "gputime_ms_per_s": 0.0}
+  ]
+}"""
+
+
+class TestPowerMetricsParse:
+    def test_parses_tasks_to_gpu_pct(self, monitor):
+        out = monitor._parse_powermetrics_gpu_json(SAMPLE_POWERMETRICS_JSON)
+        # 250 ms per 1000 ms → 25.0%
+        assert abs(out[100] - 25.0) < 0.01
+        assert abs(out[200] - 5.0) < 0.01
+        assert out[300] == 0.0
+
+    def test_clamps_to_0_100(self, monitor):
+        # Synthetic: a task that somehow says 1500 ms/s
+        blob = b'{"tasks": [{"pid": 5, "gputime_ms_per_s": 1500.0}]}'
+        out = monitor._parse_powermetrics_gpu_json(blob)
+        assert out[5] == 100.0
+
+    def test_empty_input_returns_empty_dict(self, monitor):
+        assert monitor._parse_powermetrics_gpu_json(b"") == {}
+        assert monitor._parse_powermetrics_gpu_json(None) == {}
+
+    def test_malformed_json_returns_empty_dict(self, monitor):
+        assert monitor._parse_powermetrics_gpu_json(b"not json") == {}
+
+    def test_missing_tasks_key_returns_empty_dict(self, monitor):
+        assert monitor._parse_powermetrics_gpu_json(b"{}") == {}
+
+    def test_skips_invalid_pid(self, monitor):
+        blob = b'{"tasks": [{"pid": "x", "gputime_ms_per_s": 5}]}'
+        out = monitor._parse_powermetrics_gpu_json(blob)
+        assert out == {}
+
+
+class TestGpuProbe:
+    def test_probe_disabled_when_not_root(self, monitor):
+        monitor._gpu_supported_probed = False
+        with patch("procmon.os.geteuid", return_value=501):
+            monitor._probe_gpu_supported()
+        assert monitor._gpu_supported is False
+        assert monitor._gpu_status == "needs root"
+
+    def test_probe_disabled_when_powermetrics_missing(self, monitor):
+        monitor._gpu_supported_probed = False
+        with patch("procmon.os.geteuid", return_value=0), \
+             patch("procmon.shutil.which", return_value=None):
+            monitor._probe_gpu_supported()
+        assert monitor._gpu_supported is False
+        assert monitor._gpu_status == "unsupported"
+
+    def test_probe_enabled_when_root_and_powermetrics(self, monitor):
+        monitor._gpu_supported_probed = False
+        with patch("procmon.os.geteuid", return_value=0), \
+             patch("procmon.shutil.which",
+                   return_value="/usr/bin/powermetrics"):
+            monitor._probe_gpu_supported()
+        assert monitor._gpu_supported is True
+
+    def test_probe_is_idempotent(self, monitor):
+        monitor._gpu_supported_probed = True
+        # Even with root + powermetrics, a second call should be a no-op
+        # because the probe flag is already set.
+        with patch("procmon.os.geteuid", return_value=501):
+            monitor._probe_gpu_supported()
+        # _gpu_supported keeps whatever it was before (default False)
+        assert monitor._gpu_supported is False
+
+
+class TestGpuSamplerWorker:
+    def test_worker_populates_pending(self, monitor):
+        fake_proc = MagicMock()
+        fake_proc.communicate.return_value = (
+            SAMPLE_POWERMETRICS_JSON, b"")
+        with patch("procmon.subprocess.Popen", return_value=fake_proc):
+            monitor._gpu_sampler_worker()
+        assert monitor._gpu_pending is not None
+        assert 100 in monitor._gpu_pending
+
+    def test_worker_handles_timeout(self, monitor):
+        fake_proc = MagicMock()
+        fake_proc.communicate.side_effect = subprocess.TimeoutExpired(
+            cmd="powermetrics", timeout=8)
+        with patch("procmon.subprocess.Popen", return_value=fake_proc):
+            monitor._gpu_sampler_worker()
+        assert monitor._gpu_pending == {}
+        fake_proc.kill.assert_called_once()
+
+    def test_worker_disables_supported_on_oserror(self, monitor):
+        monitor._gpu_supported = True
+        with patch("procmon.subprocess.Popen",
+                   side_effect=FileNotFoundError("no powermetrics")):
+            monitor._gpu_sampler_worker()
+        assert monitor._gpu_supported is False
+        assert monitor._gpu_pending == {}
+
+    def test_poll_swaps_pending_into_samples(self, monitor):
+        monitor._gpu_pending = {42: 17.5}
+        ok = monitor._poll_gpu_result()
+        assert ok is True
+        assert monitor._gpu_samples[42] == 17.5
+        assert monitor._gpu_pending is None
+
+    def test_poll_returns_false_when_no_pending(self, monitor):
+        monitor._gpu_pending = None
+        assert monitor._poll_gpu_result() is False
+
+
+class TestGpuMaybeStart:
+    def test_skipped_when_unsupported(self, monitor):
+        monitor._gpu_supported = False
+        with patch("procmon.threading.Thread") as mock_th:
+            monitor._maybe_start_gpu_sampler()
+        mock_th.assert_not_called()
+
+    def test_skipped_when_already_running(self, monitor):
+        monitor._gpu_supported = True
+        running = MagicMock()
+        running.is_alive.return_value = True
+        monitor._gpu_worker = running
+        with patch("procmon.threading.Thread") as mock_th:
+            monitor._maybe_start_gpu_sampler()
+        mock_th.assert_not_called()
+
+    def test_skipped_when_within_interval(self, monitor):
+        monitor._gpu_supported = True
+        monitor._gpu_worker = None
+        monitor._gpu_last_sample_ts = 1e15  # far future
+        monitor._gpu_sample_interval = 5.0
+        with patch("procmon.threading.Thread") as mock_th:
+            monitor._maybe_start_gpu_sampler()
+        mock_th.assert_not_called()
+
+
+class TestGpuChatContext:
+    def test_chat_context_includes_gpu_when_present(self, monitor):
+        from tests.conftest import make_proc
+        r = make_proc(pid=100)
+        r["gpu_pct"] = 42.0
+        monitor.rows = [r]
+        monitor.selected = 0
+        label, text = monitor._collect_chat_context()
+        assert "gpu" in text.lower()
+
+    def test_chat_context_omits_gpu_when_absent(self, monitor):
+        from tests.conftest import make_proc
+        r = make_proc(pid=100)
+        # gpu_pct not set
+        monitor.rows = [r]
+        monitor.selected = 0
+        label, text = monitor._collect_chat_context()
+        # No 'gpu:' line should be present
+        assert "  gpu:" not in text
