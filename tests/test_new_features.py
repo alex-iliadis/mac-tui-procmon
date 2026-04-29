@@ -658,3 +658,104 @@ class TestTrendSection:
         lines = monitor._format_inspect_report(artifacts)
         joined = "\n".join(lines)
         assert "TREND" in joined
+
+
+# ── 7. Unified Logging per-process stream ────────────────────────────────
+
+
+class TestUnifiedLogMode:
+    def test_toggle_starts_subprocess_with_correct_argv(self, monitor):
+        from tests.conftest import make_proc
+        monitor.rows = [make_proc(pid=42, command="/usr/bin/foo")]
+        monitor.selected = 0
+        fake_proc = MagicMock()
+        fake_proc.stdout = MagicMock()
+        fake_proc.stdout.readline = MagicMock(return_value=b"")
+        fake_proc.stderr = MagicMock()
+        fake_proc.stderr.readline = MagicMock(return_value=b"")
+        with patch("procmon.subprocess.Popen",
+                   return_value=fake_proc) as mock_popen:
+            monitor._toggle_unified_log_mode()
+        argv = mock_popen.call_args[0][0]
+        assert argv[:2] == ["log", "stream"]
+        assert "--process" in argv
+        assert "42" in argv
+        assert "--style" in argv
+        assert "compact" in argv
+        assert monitor._unified_log_mode is True
+        assert monitor._unified_log_pid == 42
+
+    def test_toggle_off_kills_subprocess(self, monitor):
+        # Simulate an active stream; second toggle should stop it.
+        fake_proc = MagicMock()
+        monitor._unified_log_mode = True
+        monitor._unified_log_proc = fake_proc
+        monitor._toggle_unified_log_mode()
+        assert monitor._unified_log_mode is False
+        assert fake_proc.terminate.called or fake_proc.kill.called
+        assert monitor._unified_log_proc is None
+
+    def test_lines_appended_under_lock(self, monitor):
+        monitor._append_unified_log_line("hello")
+        monitor._append_unified_log_line("world")
+        with monitor._unified_log_lock:
+            snap = list(monitor._unified_log_lines)
+        assert snap == ["hello", "world"]
+
+    def test_format_view_shows_recent_lines(self, monitor):
+        monitor._unified_log_pid = 42
+        monitor._append_unified_log_line("2026-04-27 12:00:00 foo[42]: alive")
+        out = monitor._format_unified_log_view()
+        joined = "\n".join(out)
+        assert "log stream" in joined
+        assert "alive" in joined
+
+    def test_format_view_loading_message_when_empty(self, monitor):
+        monitor._unified_log_pid = 1
+        monitor._unified_log_loading = True
+        out = monitor._format_unified_log_view()
+        joined = "\n".join(out)
+        assert "Connecting" in joined
+
+    def test_escape_in_detail_focus_closes_mode(self, monitor):
+        fake_proc = MagicMock()
+        monitor._detail_focus = True
+        monitor._unified_log_mode = True
+        monitor._unified_log_proc = fake_proc
+        monitor.handle_input(27)
+        assert monitor._unified_log_mode is False
+        assert fake_proc.terminate.called or fake_proc.kill.called
+
+    def test_main_U_key_triggers_toggle(self, monitor):
+        from tests.conftest import make_proc
+        monitor.rows = [make_proc(pid=42)]
+        monitor.selected = 0
+        with patch.object(monitor, "_toggle_unified_log_mode") as tog:
+            monitor.handle_input(ord("U"))
+        tog.assert_called_once()
+
+    def test_shutdown_kills_unified_log_proc(self, monitor):
+        fake_proc = MagicMock()
+        monitor._unified_log_proc = fake_proc
+        monitor._shutdown()
+        assert fake_proc.terminate.called or fake_proc.kill.called
+
+    def test_chat_context_includes_unified_log_tail(self, monitor):
+        monitor._unified_log_mode = True
+        monitor._unified_log_pid = 42
+        monitor._unified_log_cmd = "foo"
+        for i in range(5):
+            monitor._append_unified_log_line(f"sample-line-{i}")
+        label, text = monitor._collect_chat_context()
+        assert "Unified Log" in label
+        assert "sample-line-4" in text
+
+    def test_subprocess_failure_surfaced_as_error_line(self, monitor):
+        from tests.conftest import make_proc
+        monitor.rows = [make_proc(pid=42)]
+        monitor.selected = 0
+        with patch("procmon.subprocess.Popen",
+                   side_effect=FileNotFoundError("log not found")):
+            monitor._toggle_unified_log_mode()
+        snap = list(monitor._unified_log_lines)
+        assert any("failed to start" in l for l in snap)

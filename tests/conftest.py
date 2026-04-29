@@ -159,6 +159,20 @@ def monitor():
     mon._events_lock = threading.Lock()
     mon._events_max = 500
     mon._events_awaiting_summary = False
+    # Unified Logging per-process stream
+    import collections as _c_unified
+    import threading as _t_unified
+    mon._unified_log_mode = False
+    mon._unified_log_pid = None
+    mon._unified_log_cmd = ""
+    mon._unified_log_lines = _c_unified.deque(maxlen=2000)
+    mon._unified_log_lock = _t_unified.Lock()
+    mon._unified_log_proc = None
+    mon._unified_log_worker = None
+    mon._unified_log_loading = False
+    mon._unified_log_cancel = False
+    mon._unified_log_scroll = 0
+    mon._unified_log_max = 2000
     # Traffic Inspector
     mon._traffic_mode = False
     mon._traffic_proc = None

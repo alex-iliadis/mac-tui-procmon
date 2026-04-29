@@ -3157,6 +3157,23 @@ class ProcMonUI:
         # Two-stage exit: first Esc stops the stream and triggers an LLM
         # summary of the captured events; a second Esc actually closes.
         self._events_awaiting_summary = False
+        # ── Unified Logging per-process stream ────────────────────────
+        # Wraps `log stream --process <pid>` so the user can watch the
+        # native macOS unified-log feed for a single process. No sudo
+        # required for most info-level entries; system-private payloads
+        # may render as <private> without root.
+        self._unified_log_mode = False
+        self._unified_log_pid = None
+        self._unified_log_cmd = ""
+        self._unified_log_lines = collections.deque(maxlen=2000)
+        self._unified_log_lock = threading.Lock()
+        self._unified_log_proc = None
+        self._unified_log_worker = None
+        self._unified_log_loading = False
+        self._unified_log_cancel = False
+        self._unified_log_scroll = 0
+        self._unified_log_max = 2000
+
         # ── Traffic Inspector (experimental mitmproxy wrapper) ────────
         # MITM proxy mode: launches `mitmdump` in a subprocess with a shim
         # script that prints one JSON line per completed flow. A reader
@@ -3946,6 +3963,12 @@ class ProcMonUI:
             detail_title = "Traffic Inspector (experimental)"
             max_detail_h = max(8, (h - y) * 2 // 3)
             detail_h = min(len(detail_all_lines) + 2, max_detail_h)
+        elif self._unified_log_mode:
+            detail_all_lines = self._format_unified_log_view()
+            detail_title = (f"Unified Log — {self._unified_log_cmd} "
+                            f"(PID {self._unified_log_pid})")
+            max_detail_h = max(8, (h - y) * 2 // 3)
+            detail_h = min(len(detail_all_lines) + 2, max_detail_h)
         elif self._net_mode:
             if self._net_entries:
                 detail_all_lines = []
@@ -4096,6 +4119,9 @@ class ProcMonUI:
         elif self._traffic_mode:
             scroll = self._traffic_scroll
             sel_line = -1
+        elif self._unified_log_mode:
+            scroll = self._unified_log_scroll
+            sel_line = -1
         elif self._net_mode:
             scroll = self._net_scroll
             sel_line = self._net_selected if self._detail_focus else -1
@@ -4140,6 +4166,9 @@ class ProcMonUI:
             title = detail_title
         elif self._traffic_mode:
             surface = "traffic_view"
+            title = detail_title
+        elif self._unified_log_mode:
+            surface = "unified_log_view"
             title = detail_title
         elif self._net_mode:
             surface = "network_view"
@@ -4469,6 +4498,16 @@ class ProcMonUI:
                     ("Tab", "Procs"),
                     ("q", "Quit"),
                 ]
+            elif self._unified_log_mode:
+                shortcuts = [
+                    ("\u2191\u2193", "Scroll"),
+                    ("PgU/D", "Page"),
+                    ("c", "Clear"),
+                    ("?", "Ask"),
+                    ("Esc", "Stop+Close"),
+                    ("Tab", "Procs"),
+                    ("q", "Quit"),
+                ]
             else:
                 shortcuts = [
                     ("\u2191\u2193", "Select"),
@@ -4493,8 +4532,8 @@ class ProcMonUI:
                 ("F", "Process"),
                 ("N", "Net"),
                 ("T", "Triage"),
+                ("U", "Log"),
                 ("?", "Ask"),
-                ("L", "Log"),
                 ("f", "Filter"),
                 ("C", "Config"),
                 ("PgU/D", "Page"),
@@ -4657,6 +4696,30 @@ class ProcMonUI:
                     self._stop_traffic_stream()
                     return False
                 return True
+            elif self._unified_log_mode:
+                if key == curses.KEY_UP:
+                    self._unified_log_scroll = max(
+                        0, self._unified_log_scroll - 1)
+                elif key == curses.KEY_DOWN:
+                    self._unified_log_scroll += 1
+                elif key == curses.KEY_PPAGE:
+                    self._unified_log_scroll = max(
+                        0, self._unified_log_scroll - self._page_size())
+                elif key == curses.KEY_NPAGE:
+                    self._unified_log_scroll += self._page_size()
+                elif key == ord("c"):
+                    with self._unified_log_lock:
+                        self._unified_log_lines.clear()
+                elif key == ord("\t"):
+                    self._detail_focus = False
+                elif key == 27:
+                    self._stop_unified_log_stream()
+                    self._unified_log_mode = False
+                    self._detail_focus = False
+                elif key == ord("q"):
+                    self._stop_unified_log_stream()
+                    return False
+                return True
             else:
                 # Net mode detail focus
                 n = len(self._net_entries) or 1
@@ -4730,10 +4793,13 @@ class ProcMonUI:
             self._toggle_inspect_mode()
         elif key == ord("T"):
             self._toggle_process_triage_mode()
+        elif key == ord("U"):
+            self._toggle_unified_log_mode()
         elif key == ord("\t"):
             if (self._inspect_mode or self._net_mode
                     or self._events_mode
-                    or self._audit_mode or self._traffic_mode):
+                    or self._audit_mode or self._traffic_mode
+                    or self._unified_log_mode):
                 self._detail_focus = True
         elif key == ord("C"):  # Shift+C — alert config
             self._prompt_config()
@@ -4758,6 +4824,10 @@ class ProcMonUI:
             elif self._traffic_mode:
                 self._stop_traffic_stream()
                 self._traffic_mode = False
+                self._detail_focus = False
+            elif self._unified_log_mode:
+                self._stop_unified_log_stream()
+                self._unified_log_mode = False
                 self._detail_focus = False
             else:
                 return False
@@ -6206,6 +6276,130 @@ class ProcMonUI:
                 pass
         self._events_proc = None
 
+    # ── Unified Logging per-process stream ─────────────────────────────
+
+    def _toggle_unified_log_mode(self):
+        """Start/stop streaming `log stream --process <pid>` for the row.
+
+        Writes the result lines into a bounded ring buffer that the
+        detail panel renders. The subprocess is killed cleanly on Esc
+        and on TUI exit (see _shutdown).
+        """
+        if self._unified_log_mode:
+            self._stop_unified_log_stream()
+            self._unified_log_mode = False
+            self._detail_focus = False
+            return
+        if not self.rows:
+            return
+        sel = self.rows[self.selected]
+        pid = sel["pid"]
+        cmd = sel.get("command", "").split()[0].rsplit("/", 1)[-1][:20]
+        # Close any other detail mode to avoid conflicting subprocesses.
+        if self._events_mode:
+            self._stop_events_stream()
+            self._events_mode = False
+        self._inspect_mode = False
+        self._net_mode = False
+        self._unified_log_pid = pid
+        self._unified_log_cmd = cmd
+        with self._unified_log_lock:
+            self._unified_log_lines = collections.deque(
+                maxlen=self._unified_log_max)
+        self._unified_log_scroll = 0
+        self._unified_log_mode = True
+        self._unified_log_loading = True
+        self._detail_focus = True
+        self._start_unified_log_stream(pid)
+
+    def _start_unified_log_stream(self, pid):
+        """Spawn `log stream` for the given pid and a reader thread."""
+        if (self._unified_log_worker
+                and self._unified_log_worker.is_alive()):
+            return
+        argv = [
+            "log", "stream",
+            "--process", str(pid),
+            "--level", "info",
+            "--style", "compact",
+        ]
+        env = {**os.environ,
+               "PATH": _USER_TOOL_PATH,
+               "HOME": _EFFECTIVE_HOME}
+        try:
+            self._unified_log_proc = subprocess.Popen(
+                argv,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=0,
+                env=env,
+            )
+        except (FileNotFoundError, OSError) as e:
+            self._append_unified_log_line(
+                f"[failed to start log stream: {e}]")
+            self._unified_log_proc = None
+            self._unified_log_loading = False
+            return
+        self._unified_log_cancel = False
+
+        def _reader():
+            proc = self._unified_log_proc
+            if not proc or not proc.stdout:
+                return
+            try:
+                for raw in iter(proc.stdout.readline, b""):
+                    if self._unified_log_cancel:
+                        break
+                    line = raw.decode(
+                        "utf-8", errors="replace").rstrip("\n")
+                    if line:
+                        self._append_unified_log_line(line)
+            except Exception as e:
+                self._append_unified_log_line(f"[reader error: {e}]")
+
+        def _stderr_reader():
+            proc = self._unified_log_proc
+            if not proc or not proc.stderr:
+                return
+            try:
+                for raw in iter(proc.stderr.readline, b""):
+                    if self._unified_log_cancel:
+                        break
+                    line = raw.decode(
+                        "utf-8", errors="replace").rstrip()
+                    if line:
+                        self._append_unified_log_line(
+                            f"[log stream stderr] {line}")
+            except Exception:
+                pass
+
+        self._unified_log_worker = threading.Thread(
+            target=_reader, daemon=True)
+        self._unified_log_worker.start()
+        threading.Thread(
+            target=_stderr_reader, daemon=True).start()
+
+    def _append_unified_log_line(self, line):
+        with self._unified_log_lock:
+            self._unified_log_lines.append(line)
+
+    def _stop_unified_log_stream(self):
+        """Kill the `log stream` subprocess. Safe to call repeatedly."""
+        self._unified_log_cancel = True
+        proc = self._unified_log_proc
+        if proc:
+            try:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+            except Exception:
+                pass
+        self._unified_log_proc = None
+        self._unified_log_loading = False
+
     # ── Traffic Inspector (experimental mitmproxy wrapper) ────────────
 
     _MITM_SHIM = (
@@ -6490,6 +6684,24 @@ class ProcMonUI:
         t = threading.Thread(target=_worker, daemon=True)
         self._llm_summary_worker["events"] = t
         t.start()
+
+    def _format_unified_log_view(self):
+        """Build display lines for the unified-log detail box."""
+        with self._unified_log_lock:
+            snapshot = list(self._unified_log_lines)
+        header = (f"`log stream --process {self._unified_log_pid} "
+                  f"--level info --style compact`")
+        lines = [header, ""]
+        if not snapshot:
+            if self._unified_log_loading:
+                lines.append("  Connecting to unified log…")
+            else:
+                lines.append("  (no log entries yet)")
+            return lines
+        # Cap displayed depth so very chatty processes don't blow up render.
+        for ln in snapshot[-1000:]:
+            lines.append(ln)
+        return lines
 
     def _format_events_view(self):
         """Build display lines for the events detail box."""
@@ -8194,6 +8406,19 @@ class ProcMonUI:
                 parts.append(
                     f"  [{sev}] pid={e.get('pid')} ppid={e.get('ppid')} "
                     f"{event_label}: {e.get('cmd', '')}")
+        elif self._unified_log_mode:
+            label = (f"Unified Log: PID {self._unified_log_pid} "
+                     f"({self._unified_log_cmd})")
+            with self._unified_log_lock:
+                snap = list(self._unified_log_lines)[-50:]
+            parts.append(
+                f"The user is watching the macOS unified-log feed for "
+                f"PID {self._unified_log_pid} ({self._unified_log_cmd}) "
+                f"via `log stream --process {self._unified_log_pid} "
+                f"--level info --style compact`. Recent log lines (last "
+                f"{len(snap)}):")
+            for ln in snap:
+                parts.append(f"  {ln[:300]}")
         elif self.rows and self.selected < len(self.rows):
             r = self.rows[self.selected]
             label = f"Process: PID {r['pid']} ({r['command'][:40]})"
@@ -8959,6 +9184,10 @@ class ProcMonUI:
             self._stop_traffic_stream()
         except Exception:
             pass
+        try:
+            self._stop_unified_log_stream()
+        except Exception:
+            pass
         # Kill any still-running event subprocess explicitly
         proc = getattr(self, "_events_proc", None)
         if proc:
@@ -9008,6 +9237,9 @@ class ProcMonUI:
                 self.render()
             # Re-render the events view as new events arrive
             if self._events_mode:
+                self.render()
+            # Re-render the unified-log view as new lines arrive
+            if self._unified_log_mode:
                 self.render()
 
             now = time.monotonic()
