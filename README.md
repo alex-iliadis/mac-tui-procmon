@@ -9,7 +9,7 @@
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](LICENSE)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![macOS 13+](https://img.shields.io/badge/macOS-13%2B-lightgrey)
-![Tests 945 passing](https://img.shields.io/badge/tests-945%20passing-brightgreen)
+![Tests 1010 passing](https://img.shields.io/badge/tests-1010%20passing-brightgreen)
 ![Coverage 75%](https://img.shields.io/badge/coverage-75%25-brightgreen)
 ![AI Claude · Codex · Gemini](https://img.shields.io/badge/AI-Claude%20%C2%B7%20Codex%20%C2%B7%20Gemini-8a2be2)
 
@@ -27,6 +27,11 @@
 - **🛡 Zero-stall under sudo.** When you run as root for memory-region YARA or `eslogger`, every assistant subprocess is wrapped to drop back to your real UID — so the local keychain still works and `claude` doesn't hang on auth.
 - **⚡ Resilient core.** Direct `libproc` / `sysctl` snapshots, no `fork()` per refresh. Survives fork bombs and memory exhaustion that knock `htop` and Activity Monitor offline.
 - **📜 LLM-summarized event streams.** Watch a live Endpoint Security stream, hit `Esc` once, and the captured exec / auth / TCC / XProtect events come back as an executive summary before the panel closes.
+- **🪵 Per-process Unified Log feed.** Press `U` and the detail panel becomes a live `log stream --process <pid> --level info --style compact` tail — every subsystem/category message the selected process emits to `os_log`, with the AI overlay reading the last 50 lines as system context.
+- **🎮 GPU & Metal usage per PID.** When run as root with `powermetrics` available, a background sampler decodes `--samplers tasks --show-process-gpu` JSON every 5 s and surfaces per-process `GPU%` in the detail panel.
+- **💾 Disk I/O bytes per PID.** Cumulative read / written bytes from `proc_pid_rusage(RUSAGE_INFO_V4)` plus a derived B/s rate, all without forking.
+- **📊 Sparkline trends.** The Inspect panel's `── TREND ──` section renders 60-sample Unicode-block sparklines for CPU%, RSS, ↓ Net, ↑ Net.
+- **🪪 Mach IPC handle count.** Inspect surfaces `IPC: N Mach file ports` via `proc_pidinfo(PROC_PIDLISTFILEPORTS)` — a useful XPC / IPC pressure signal that does not require root.
 
 > [!NOTE]
 > **Process-monitoring only.** Host-wide security posture — TCC, kernel/boot, persistence, browser extensions, CVE intelligence, full security scoring, remediation workflows, headless audit reports — lives in the sister project [`mac-system-security`](https://github.com/alex-iliadis/mac-system-security).
@@ -50,6 +55,7 @@
 - [Live Telemetry](#live-telemetry)
   - [Endpoint Security Stream](#endpoint-security-stream)
   - [Traffic Inspector](#traffic-inspector)
+- [Live Per-Process Logs](#live-per-process-logs)
 - [Ask Claude](#ask-claude)
 - [Debug Log](#debug-log)
 - [Alerts & Configuration](#alerts--configuration)
@@ -179,9 +185,21 @@ Top-of-report badges (`[MEMORY-DUMPED]`, `[MEMORY-SKIPPED]`,
 
 ![Inspect View](screenshots/inspect-view.png)
 
-The same view shows entitlement abuse signals when present — for
-example, dangerous combos on a non-Apple binary or runtime paths
-under user-writable trees.
+The Inspect view also surfaces:
+
+- A **`── TREND ──` sparkline section** showing the last 60 samples
+  of CPU%, MEM (RSS), ↓ Net rate, ↑ Net rate as Unicode blocks
+  (`▁▂▃▄▅▆▇█`) with the per-metric peak.
+- An **`── IPC: N Mach file ports ──` line** — a count of file-port
+  handles the process holds, sampled via
+  `proc_pidinfo(PROC_PIDLISTFILEPORTS)`. No root required.
+- The default selected-process detail panel (no `I` needed) shows
+  per-process **disk I/O rate + cumulative bytes** read/written,
+  pulled from `proc_pid_rusage(RUSAGE_INFO_V4)`, plus a **`GPU%`**
+  field when the GPU sampler is active.
+- Entitlement abuse signals when present — for example, dangerous
+  combos on a non-Apple binary or runtime paths under user-writable
+  trees.
 
 ### Deep Process Triage
 
@@ -207,8 +225,14 @@ endpoint owned by the selected process via `lsof`/`nettop`, with:
   `[Cloudflare]`, …)
 - Per-flow cumulative bytes in/out
 
-Press `k` on a highlighted row to kill **just that connection**
-without killing the process. Press `N` again or `Esc` to close.
+Press `k` on a highlighted row to **SIGKILL the owning process**.
+A confirmation modal appears first (y/N) so a fat-fingered `k`
+doesn't terminate Safari. macOS user-space has no portable
+per-flow kill — pure-userspace tools cannot drop a single socket
+without `pfctl` / `tcpkill` and root — so the kill is whole-
+process by design. The shortcut bar reflects this honestly with
+"Kill proc" rather than "Kill conn". Press `N` again or `Esc` to
+close.
 
 ---
 
@@ -245,6 +269,33 @@ is explicit.
 Experimental. Spins up a `mitmdump` shim on a local port (default
 `127.0.0.1:8080`) and surfaces flows attributable to the selected
 process. `c` clears flows; `Esc` stops the shim and closes.
+
+---
+
+## Live Per-Process Logs
+
+Press `U` on a selected process to open a live tail of the macOS
+unified-log feed scoped to that PID. Internally:
+
+```
+log stream --process <pid> --level info --style compact
+```
+
+is spawned, piped into a 2000-line ring buffer, and rendered into
+the detail panel. The compact style produces human-readable
+`<timestamp> <process>[<pid>]: <subsystem.category> <message>`
+lines so you can correlate exactly what the process is doing
+*right now* with what every other panel shows. Most info-level
+entries are visible without `sudo`; system-private payloads may
+still render as `<private>` without root — that's macOS, not us.
+
+Detail-focus shortcuts: `↑`/`↓` and `PgUp`/`PgDn` scroll the
+buffer, `c` clears, `Esc` kills the subprocess and closes.
+
+The Ask Claude overlay (see below) reads the **last 50 captured
+lines** as system context when invoked from this mode, so follow-up
+questions like *"why is this process so chatty about
+`com.apple.WebKit.GPU`?"* land already grounded in real evidence.
 
 ---
 
@@ -370,6 +421,7 @@ youruser ALL=(root) NOPASSWD: /usr/local/sbin/mac-tui-procmon-sudo *
 | `N`             | Toggle Network mode for selected process              |
 | `I`             | Toggle Inspect mode                                   |
 | `T`             | Toggle Deep Process Triage                            |
+| `U`             | Toggle Unified Log stream for selected process        |
 | `Shift+C`       | Alert config dialog                                   |
 | `k`             | Kill selected process (`SIGTERM`)                     |
 | `L`             | Toggle debug log overlay                              |
@@ -378,7 +430,7 @@ youruser ALL=(root) NOPASSWD: /usr/local/sbin/mac-tui-procmon-sudo *
 | `Esc`           | Close current special mode (or quit if none open)     |
 | `q`             | Quit                                                  |
 
-### Detail focus (Inspect / Audit / Events / Traffic / Network)
+### Detail focus (Inspect / Audit / Events / Traffic / Network / Unified Log)
 
 | Key             | Action                       |
 |-----------------|------------------------------|
@@ -394,7 +446,8 @@ Mode-specific extras:
 - **Audit / Triage** — `R`/`r` re-run, structured cursor over findings.
 - **Events** — `c` clears; first Esc stops + LLM summary, second Esc closes.
 - **Traffic** — `c` clears flows; Esc/q stop the mitmdump shim.
-- **Network** — `k` kills the highlighted connection; `N` closes.
+- **Network** — `k` SIGKILLs the connection's owning process (with confirmation); `N` closes.
+- **Unified Log** — `c` clears the ring buffer; `Esc`/`q` stop the `log stream` subprocess and close.
 
 ### Chat overlay (`?`)
 
@@ -498,10 +551,10 @@ External tools:
     --cov-report=term-missing
 ```
 
-Local: **945 passed**, 75% coverage on `mac_tui_procmon_impl.py`
-(5,770 statements). The 100% number on the public shim is an
-artifact of measuring the re-export module — see
-[Testing](docs/wiki/Testing.md) for the full breakdown.
+Local: **1010 passed**. Coverage runs over `mac_tui_procmon_impl.py`
+(the 100% number on the public shim is an artifact of measuring the
+re-export module) — see [Testing](docs/wiki/Testing.md) for the full
+breakdown.
 
 ---
 
