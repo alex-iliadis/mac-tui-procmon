@@ -3368,6 +3368,12 @@ class ProcMonUI:
         self._replay_driveby_pairs = set()
         # Window for considering a curl→shell sequence "drive-by"
         self._replay_driveby_window_secs = 5.0
+        # ── Feature 6: Network Orbit / Constellation ────────────────
+        # Renders the selected PID as a center node with each remote
+        # endpoint orbiting it. Edges are colored by service. Animated
+        # particles travel along edges to imply throughput.
+        self._orbit_mode = False
+        self._orbit_tick = 0  # increments each render so particles move
         # Test-only TUI report capture. This is intentionally opt-in so the
         # normal user-facing UI stays unchanged. The harness uses it to export
         # the exact detail-pane buffer for post-run assertions.
@@ -4481,7 +4487,10 @@ class ProcMonUI:
             max_detail_h = max(8, (h - y) * 2 // 3)
             detail_h = min(len(detail_all_lines) + 2, max_detail_h)
         elif self._net_mode:
-            if self._net_entries:
+            if self._orbit_mode and self._net_entries:
+                # Feature 6: Network Orbit / Constellation render.
+                detail_all_lines = self._build_orbit_lines(w, h)
+            elif self._net_entries:
                 detail_all_lines = []
                 for idx, e in enumerate(self._net_entries):
                     line = e["display"]
@@ -5307,11 +5316,16 @@ class ProcMonUI:
                     self._kill_net_connection_owner_process()
                 elif key == ord("N"):
                     self._toggle_net_mode()
+                elif key == ord("g"):
+                    self._toggle_orbit_mode()
                 elif key == ord("\t"):
                     self._detail_focus = False
                 elif key == 27:  # Escape — close net mode
-                    self._net_mode = False
-                    self._detail_focus = False
+                    if self._orbit_mode:
+                        self._orbit_mode = False
+                    else:
+                        self._net_mode = False
+                        self._detail_focus = False
                 elif key == ord("q"):
                     return False
                 return True
@@ -5539,6 +5553,172 @@ class ProcMonUI:
         # Re-fetch connections and store as pending result
         result = self._fetch_net_connections(root_pid)
         self._net_pending = result
+
+    # ── Feature 6: Network Orbit / Constellation ───────────────────────
+
+    def _toggle_orbit_mode(self):
+        """Toggle orbit (constellation) view of remote endpoints.
+
+        Only valid while net mode is active — pressing `g` from net mode.
+        """
+        if not self._net_mode:
+            return
+        self._orbit_mode = not self._orbit_mode
+
+    @staticmethod
+    def _orbit_layout(n_remotes, center, radius):
+        """Place `n_remotes` nodes evenly on a circle around `center`.
+
+        Returns a list of (x, y) integer tuples.
+        """
+        import math
+        cx, cy = center
+        out = []
+        if n_remotes <= 0:
+            return out
+        for i in range(n_remotes):
+            angle = (i / n_remotes) * 2 * math.pi
+            x = int(round(cx + radius * 2.0 * math.cos(angle)))
+            y = int(round(cy + radius * math.sin(angle)))
+            out.append((x, y))
+        return out
+
+    @staticmethod
+    def _orbit_particle_position(start, end, tick, length=None):
+        """Compute the particle's (x, y) position along an edge for tick.
+
+        The particle wraps around with period max(1, length); when length
+        is None the path length is the chebyshev distance between start
+        and end.
+        """
+        sx, sy = start
+        ex, ey = end
+        dx = ex - sx
+        dy = ey - sy
+        path_len = max(abs(dx), abs(dy)) or 1
+        if length is None:
+            length = path_len
+        t = (tick % max(1, length)) / max(1, length)
+        x = int(round(sx + dx * t))
+        y = int(round(sy + dy * t))
+        return (x, y)
+
+    @staticmethod
+    def _orbit_edge_color(proto, service):
+        """Return a color_pair for the edge based on proto + service."""
+        s = (service or "").lower()
+        if "https" in s or s == "443":
+            return 9   # blue
+        if "http" in s:
+            return 3   # yellow
+        if "ssh" in s:
+            return 7   # cyan
+        if (proto or "").upper() == "UDP":
+            return 8   # magenta
+        return 10  # default grey/white
+
+    def _build_orbit_lines(self, w, h):
+        """Render the orbit constellation as text lines (no curses calls)."""
+        # Box dimensions: leave 1-cell padding all around.
+        if w < 30 or h < 10:
+            return [" Orbit view needs a larger window"]
+        # Render onto a 2D character grid.
+        grid_h = max(10, h - 4)
+        grid_w = max(30, w - 6)
+        grid = [[" "] * grid_w for _ in range(grid_h)]
+        labels = []  # (y, x, text) drawn after edges so they sit on top
+        cx, cy = grid_w // 2, grid_h // 2
+        radius = min(grid_w // 4, grid_h // 3)
+
+        # Center node — selected PID
+        grid[cy][cx] = "●"
+        center_text = f"PID {self._net_pid}"
+        # Place center label below the dot
+        if cy + 1 < grid_h:
+            for i, ch in enumerate(center_text[:grid_w - cx]):
+                if cx + i < grid_w:
+                    grid[cy + 1][cx + i] = ch
+
+        # Remote endpoints
+        remotes = list(self._net_entries[:16])  # cap so it stays readable
+        positions = self._orbit_layout(len(remotes), (cx, cy), radius)
+
+        for (rx, ry), entry in zip(positions, remotes):
+            rx = max(1, min(grid_w - 2, rx))
+            ry = max(1, min(grid_h - 2, ry))
+            # Draw edge line with Bresenham, picking color glyph based on
+            # service.
+            self._orbit_draw_line(grid, (cx, cy), (rx, ry))
+            # Endpoint dot
+            grid[ry][rx] = "○"
+            # Label: service[:port] [Org]
+            port = ""
+            ak = entry.get("addr_key", "")
+            if "->" in ak:
+                dst = ak.split("->", 1)[1]
+                if ":" in dst:
+                    port = dst.rsplit(":", 1)[1]
+            svc = entry.get("service", "") or ""
+            org = entry.get("org", "") or ""
+            short_org = (org[:14]) if org else ""
+            text = svc or port
+            if short_org:
+                text += f" [{short_org}]"
+            labels.append((ry, rx, text))
+
+        # Animated particles — one per edge.
+        self._orbit_tick = (self._orbit_tick + 1) % 1000
+        for (rx, ry), entry in zip(positions, remotes):
+            if rx < 0 or ry < 0:
+                continue
+            rx2 = max(1, min(grid_w - 2, rx))
+            ry2 = max(1, min(grid_h - 2, ry))
+            px, py = self._orbit_particle_position(
+                (cx, cy), (rx2, ry2), self._orbit_tick)
+            if 0 <= px < grid_w and 0 <= py < grid_h:
+                # Don't overwrite endpoints
+                if (px, py) != (cx, cy) and (px, py) != (rx2, ry2):
+                    grid[py][px] = "●"
+
+        # Overlay labels — clip if they would run off the right edge.
+        for ly, lx, text in labels:
+            for i, ch in enumerate(text):
+                tx = lx + 2 + i
+                ty = ly
+                if 0 <= tx < grid_w and 0 <= ty < grid_h:
+                    grid[ty][tx] = ch
+
+        # Convert to lines.
+        return ["".join(row) for row in grid]
+
+    @staticmethod
+    def _orbit_draw_line(grid, start, end):
+        """Bresenham line with light Braille-block glyphs."""
+        h = len(grid)
+        w = len(grid[0]) if grid else 0
+        x0, y0 = start
+        x1, y1 = end
+        dx = abs(x1 - x0)
+        dy = abs(y1 - y0)
+        sx = 1 if x0 < x1 else -1
+        sy = 1 if y0 < y1 else -1
+        err = dx - dy
+        steps = 0
+        while True:
+            if 0 <= x0 < w and 0 <= y0 < h and grid[y0][x0] == " ":
+                grid[y0][x0] = "·"
+            if x0 == x1 and y0 == y1:
+                break
+            e2 = 2 * err
+            if e2 > -dy:
+                err -= dy
+                x0 += sx
+            if e2 < dx:
+                err += dx
+                y0 += sy
+            steps += 1
+            if steps > 4 * (w + h):  # safety guard
+                break
 
     def _toggle_net_mode(self):
         """Toggle network connection view in the detail box."""

@@ -526,3 +526,85 @@ class TestReplay:
         assert monitor._events_mode is False
         assert len(monitor._replay_events) == 2
         assert (100, 101) in monitor._replay_driveby_pairs
+
+
+# ── 6. Network Orbit / Constellation ──────────────────────────────────
+
+
+class TestNetworkOrbit:
+    def test_layout_n_remotes_returns_n_positions(self, monitor):
+        positions = monitor._orbit_layout(8, (40, 10), 5)
+        assert len(positions) == 8
+        # Spread roughly around (40, 10)
+        xs = [p[0] for p in positions]
+        ys = [p[1] for p in positions]
+        assert min(xs) < 40 < max(xs)
+        assert min(ys) < 10 < max(ys)
+
+    def test_layout_zero_returns_empty(self, monitor):
+        assert monitor._orbit_layout(0, (10, 5), 3) == []
+
+    def test_particle_position_wraps(self, monitor):
+        # Distance 10 → particle wraps every 10 ticks.
+        first = monitor._orbit_particle_position((0, 0), (10, 0), 0)
+        ten = monitor._orbit_particle_position((0, 0), (10, 0), 10)
+        assert first == ten
+
+    def test_particle_position_at_midpoint(self, monitor):
+        x, y = monitor._orbit_particle_position((0, 0), (10, 0), 5)
+        assert x == 5
+        assert y == 0
+
+    def test_edge_color_https(self, monitor):
+        assert monitor._orbit_edge_color("TCP", "https") == 9
+
+    def test_edge_color_ssh(self, monitor):
+        assert monitor._orbit_edge_color("TCP", "ssh") == 7
+
+    def test_edge_color_udp_default_magenta(self, monitor):
+        assert monitor._orbit_edge_color("UDP", "") == 8
+
+    def test_toggle_only_when_net_mode_active(self, monitor):
+        monitor._net_mode = False
+        monitor._toggle_orbit_mode()
+        assert monitor._orbit_mode is False
+        monitor._net_mode = True
+        monitor._toggle_orbit_mode()
+        assert monitor._orbit_mode is True
+
+    def test_build_orbit_lines_renders_endpoints(self, monitor):
+        monitor._net_pid = 42
+        monitor._net_entries = [
+            {"pid": 42, "fd": "5", "proto": "TCP", "service": "https",
+             "org": "Cloudflare", "addr_key": "1.2.3.4:50000->5.6.7.8:443",
+             "bytes_in": 100, "bytes_out": 200, "bytes_total": 300,
+             "display": "x"},
+            {"pid": 42, "fd": "6", "proto": "TCP", "service": "ssh",
+             "org": "Github", "addr_key": "1.2.3.4:50001->22.22.22.22:22",
+             "bytes_in": 0, "bytes_out": 0, "bytes_total": 0,
+             "display": "x"},
+        ]
+        lines = monitor._build_orbit_lines(w=80, h=24)
+        joined = "\n".join(lines)
+        # Center label
+        assert "PID 42" in joined
+        # At least one orbit endpoint glyph
+        assert "○" in joined
+        # Org name visible
+        assert "Cloudflare" in joined or "Github" in joined
+
+    def test_build_orbit_lines_no_country_or_city(self, monitor):
+        # We must not surface country/city in orbit labels.
+        monitor._net_pid = 42
+        monitor._net_entries = [{
+            "pid": 42, "fd": "1", "proto": "TCP", "service": "https",
+            "org": "Cloudflare",
+            "addr_key": "1.2.3.4:5000->5.6.7.8:443",
+            "bytes_in": 0, "bytes_out": 0, "bytes_total": 0,
+            "display": "",
+        }]
+        lines = monitor._build_orbit_lines(w=80, h=24)
+        joined = "\n".join(lines)
+        # No 2-letter country code in our layout — only org names.
+        assert "[US]" not in joined
+        assert "California" not in joined

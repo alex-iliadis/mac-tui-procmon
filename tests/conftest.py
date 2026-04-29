@@ -244,5 +244,8 @@ def monitor():
     mon._replay_speed = 1.0
     mon._replay_driveby_pairs = set()
     mon._replay_driveby_window_secs = 5.0
+    # Feature 6: Network Orbit / Constellation
+    mon._orbit_mode = False
+    mon._orbit_tick = 0
     mon._test_select_pid = 0
     return mon
