@@ -313,7 +313,8 @@ class TestDetailFocusNavigation:
 
     def test_k_kills_connection_from_detail(self, monitor):
         self._setup_detail(monitor)
-        with patch.object(monitor, "_kill_net_connection") as mock_kill:
+        with patch.object(monitor,
+                          "_kill_net_connection_owner_process") as mock_kill:
             monitor.handle_input(ord("k"))
             mock_kill.assert_called_once()
 

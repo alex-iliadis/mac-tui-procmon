@@ -428,9 +428,11 @@ class TestDetailFocusInput:
     def test_kill_in_detail(self, monitor):
         """Kill connection from detail focus (line 1571)."""
         monitor._detail_focus = True
+        monitor._net_mode = True
         monitor._net_entries = [{"fd": "3", "pid": "100"}]
         monitor._net_selected = 0
-        with patch.object(monitor, "_kill_net_connection") as mock_kill:
+        with patch.object(monitor,
+                          "_kill_net_connection_owner_process") as mock_kill:
             monitor.handle_input(ord("k"))
             mock_kill.assert_called_once()
 

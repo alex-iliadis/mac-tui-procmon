@@ -4248,7 +4248,7 @@ class ProcMonUI:
             else:
                 shortcuts = [
                     ("\u2191\u2193", "Select"),
-                    ("k", "Kill"),
+                    ("k", "Kill proc"),
                     ("?", "Ask"),
                     ("N", "Close"),
                     ("Tab", "Procs"),
@@ -4449,7 +4449,7 @@ class ProcMonUI:
                     self._net_selected = min(n - 1, self._net_selected + self._page_size())
                     self._scroll_net_to_selected()
                 elif key == ord("k"):
-                    self._kill_net_connection()
+                    self._kill_net_connection_owner_process()
                 elif key == ord("N"):
                     self._toggle_net_mode()
                 elif key == ord("\t"):
@@ -4576,13 +4576,30 @@ class ProcMonUI:
         elif self._net_selected >= self._net_scroll + inner_h:
             self._net_scroll = self._net_selected - inner_h + 1
 
-    def _kill_net_connection(self):
-        """Kill the process owning the selected network connection."""
+    def _kill_net_connection_owner_process(self):
+        """SIGKILL the process that owns the selected network connection.
+
+        NOTE: macOS user-space has no portable way to kill *just* one open
+        socket / flow without root + pfctl/tcpkill, so this terminates the
+        entire owning process. The action is gated behind a y/N confirmation
+        modal so the user can't fat-finger a SIGKILL.
+        """
         if not self._net_entries or self._net_selected >= len(self._net_entries):
             return
         entry = self._net_entries[self._net_selected]
         pid = entry["pid"]
         if pid <= 0:
+            return
+        display = entry.get("display", "")
+        prompt = (
+            f"SIGKILL the process owning this connection?\n"
+            f"PID {pid} — entire process will be terminated, not just\n"
+            f"this single flow (no per-socket kill exists in user-space\n"
+            f"on macOS without pfctl/tcpkill + root).\n"
+            f"\n"
+            f"  {display[:80]}"
+        )
+        if not self._confirm_action(prompt):
             return
         try:
             os.kill(pid, signal.SIGKILL)
@@ -4590,6 +4607,10 @@ class ProcMonUI:
             pass
         # Refresh connections in background
         self._start_net_fetch(self._net_pid)
+
+    # Backward-compatible alias kept for any external callers / tests that
+    # reach in by the old name. New code should call the renamed helper.
+    _kill_net_connection = _kill_net_connection_owner_process
 
     def _do_refresh_net_bytes(self, root_pid):
         """Fetch nettop flow data + re-fetch connections. Called from background thread."""

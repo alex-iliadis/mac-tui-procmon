@@ -323,21 +323,35 @@ class TestKillNetConnection:
         monitor._net_selected = 0
         monitor._net_pid = 100
         with patch("os.kill") as mock_kill, \
-             patch.object(monitor, "_start_net_fetch"):
-            monitor._kill_net_connection()
+             patch.object(monitor, "_start_net_fetch"), \
+             patch.object(monitor, "_confirm_action", return_value=True):
+            monitor._kill_net_connection_owner_process()
         mock_kill.assert_called_once_with(100, signal.SIGKILL)
+
+    def test_kill_aborted_when_user_declines(self, monitor):
+        monitor._net_entries = [{"pid": 100, "fd": "5u", "display": "test"}]
+        monitor._net_selected = 0
+        monitor._net_pid = 100
+        with patch("os.kill") as mock_kill, \
+             patch.object(monitor, "_start_net_fetch") as mock_fetch, \
+             patch.object(monitor, "_confirm_action", return_value=False):
+            monitor._kill_net_connection_owner_process()
+        mock_kill.assert_not_called()
+        mock_fetch.assert_not_called()
 
     def test_kill_no_entries(self, monitor):
         monitor._net_entries = []
-        with patch("os.kill") as mock_kill:
-            monitor._kill_net_connection()
+        with patch("os.kill") as mock_kill, \
+             patch.object(monitor, "_confirm_action", return_value=True):
+            monitor._kill_net_connection_owner_process()
         mock_kill.assert_not_called()
 
     def test_kill_invalid_pid(self, monitor):
         monitor._net_entries = [{"pid": 0, "fd": "5u", "display": "test"}]
         monitor._net_selected = 0
-        with patch("os.kill") as mock_kill:
-            monitor._kill_net_connection()
+        with patch("os.kill") as mock_kill, \
+             patch.object(monitor, "_confirm_action", return_value=True):
+            monitor._kill_net_connection_owner_process()
         mock_kill.assert_not_called()
 
     def test_kill_permission_error(self, monitor):
@@ -345,8 +359,15 @@ class TestKillNetConnection:
         monitor._net_selected = 0
         monitor._net_pid = 100
         with patch("os.kill", side_effect=PermissionError), \
-             patch.object(monitor, "_start_net_fetch"):
-            monitor._kill_net_connection()  # should not raise
+             patch.object(monitor, "_start_net_fetch"), \
+             patch.object(monitor, "_confirm_action", return_value=True):
+            monitor._kill_net_connection_owner_process()  # should not raise
+
+    def test_legacy_alias_still_callable(self, monitor):
+        # Some external callers / older tests may still reach in by the
+        # pre-rename name; keep the alias working.
+        assert (monitor._kill_net_connection ==
+                monitor._kill_net_connection_owner_process)
 
 
 # ── _start_net_refresh ──────────────────────────────────────────────────
