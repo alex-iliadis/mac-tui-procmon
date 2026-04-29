@@ -186,6 +186,55 @@ class proc_vnodepathinfo(ctypes.Structure):
     ]
 
 
+# proc_pid_rusage flavors (sys/resource.h). Used here for cumulative disk
+# I/O bytes (ri_diskio_bytesread / ri_diskio_byteswritten). The struct is
+# defined to its full v4 layout so ctypes computes the right field offsets;
+# we only ever read the diskio fields, but partial structs are dangerous —
+# proc_pid_rusage writes the full sizeof(rusage_info_v4) regardless.
+RUSAGE_INFO_V4 = 4
+
+
+class rusage_info_v4(ctypes.Structure):
+    _fields_ = [
+        ("ri_uuid", ctypes.c_uint8 * 16),
+        ("ri_user_time", ctypes.c_uint64),
+        ("ri_system_time", ctypes.c_uint64),
+        ("ri_pkg_idle_wkups", ctypes.c_uint64),
+        ("ri_interrupt_wkups", ctypes.c_uint64),
+        ("ri_pageins", ctypes.c_uint64),
+        ("ri_wired_size", ctypes.c_uint64),
+        ("ri_resident_size", ctypes.c_uint64),
+        ("ri_phys_footprint", ctypes.c_uint64),
+        ("ri_proc_start_abstime", ctypes.c_uint64),
+        ("ri_proc_exit_abstime", ctypes.c_uint64),
+        ("ri_child_user_time", ctypes.c_uint64),
+        ("ri_child_system_time", ctypes.c_uint64),
+        ("ri_child_pkg_idle_wkups", ctypes.c_uint64),
+        ("ri_child_interrupt_wkups", ctypes.c_uint64),
+        ("ri_child_pageins", ctypes.c_uint64),
+        ("ri_child_elapsed_abstime", ctypes.c_uint64),
+        ("ri_diskio_bytesread", ctypes.c_uint64),
+        ("ri_diskio_byteswritten", ctypes.c_uint64),
+        ("ri_cpu_time_qos_default", ctypes.c_uint64),
+        ("ri_cpu_time_qos_maintenance", ctypes.c_uint64),
+        ("ri_cpu_time_qos_background", ctypes.c_uint64),
+        ("ri_cpu_time_qos_utility", ctypes.c_uint64),
+        ("ri_cpu_time_qos_legacy", ctypes.c_uint64),
+        ("ri_cpu_time_qos_user_initiated", ctypes.c_uint64),
+        ("ri_cpu_time_qos_user_interactive", ctypes.c_uint64),
+        ("ri_billed_system_time", ctypes.c_uint64),
+        ("ri_serviced_system_time", ctypes.c_uint64),
+        ("ri_logical_writes", ctypes.c_uint64),
+        ("ri_lifetime_max_phys_footprint", ctypes.c_uint64),
+        ("ri_instructions", ctypes.c_uint64),
+        ("ri_cycles", ctypes.c_uint64),
+        ("ri_billed_energy", ctypes.c_uint64),
+        ("ri_serviced_energy", ctypes.c_uint64),
+        ("ri_interval_max_phys_footprint", ctypes.c_uint64),
+        ("ri_runnable_time", ctypes.c_uint64),
+    ]
+
+
 # ── Function Prototypes ──────────────────────────────────────────────────
 
 _libproc.proc_listallpids.argtypes = [ctypes.c_void_p, ctypes.c_int]
@@ -199,6 +248,19 @@ _libproc.proc_pidinfo.restype = ctypes.c_int
 
 _libproc.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
 _libproc.proc_pidpath.restype = ctypes.c_int
+
+# proc_pid_rusage(pid, flavor, &rusage_info_t) → 0 on success, -1 on failure.
+# We use it to read cumulative ri_diskio_bytesread / ri_diskio_byteswritten
+# (per-process disk I/O bytes since process start) from the rusage_info_v4
+# flavor.
+try:
+    _libproc.proc_pid_rusage.argtypes = [
+        ctypes.c_int, ctypes.c_int, ctypes.c_void_p,
+    ]
+    _libproc.proc_pid_rusage.restype = ctypes.c_int
+except AttributeError:
+    # Older macOS without proc_pid_rusage — degrade gracefully.
+    pass
 
 _libc.sysctl.argtypes = [
     ctypes.POINTER(ctypes.c_int), ctypes.c_uint,
@@ -904,6 +966,30 @@ def _get_total_memory_kb():
     sz = ctypes.c_size_t(ctypes.sizeof(val))
     _libc.sysctlbyname(b"hw.memsize", ctypes.byref(val), ctypes.byref(sz), None, 0)
     return val.value // 1024
+
+
+def _get_disk_io(pid):
+    """Return (bytes_read, bytes_written) since process start, or (None, None).
+
+    Reads cumulative disk I/O via proc_pid_rusage(RUSAGE_INFO_V4). Returns
+    (None, None) if the kernel rejects the call (process exited, permissions,
+    or the symbol is missing on an older macOS). NOT a rate — caller must
+    diff against a previous snapshot to derive bytes/sec.
+    """
+    if pid <= 0:
+        return (None, None)
+    if not hasattr(_libproc, "proc_pid_rusage"):
+        return (None, None)
+    info = rusage_info_v4()
+    try:
+        ret = _libproc.proc_pid_rusage(
+            pid, RUSAGE_INFO_V4, ctypes.byref(info))
+    except OSError:
+        return (None, None)
+    if ret != 0:
+        return (None, None)
+    return (int(info.ri_diskio_bytesread),
+            int(info.ri_diskio_byteswritten))
 
 
 def get_all_processes():
@@ -2898,6 +2984,11 @@ class ProcMonUI:
         self.prev_net = {}
         self.prev_time = None
         self.net_rates = {}
+        # Per-PID cumulative disk I/O bytes from proc_pid_rusage. Sampled in
+        # collect_data each refresh; rates derived by diffing against the
+        # prior snapshot, just like net rates.
+        self._prev_disk_io = {}    # pid -> (bytes_read, bytes_written)
+        self._disk_io_rates = {}   # pid -> (B/s read, B/s written)
         self.sort_mode = SORT_MEM
         self._sort_inverted = False
         self._dynamic_sort = False  # threshold-exceeding processes bubble to top
@@ -3478,8 +3569,15 @@ class ProcMonUI:
         # Compute net rates first so they're available for tree aggregation
         net_snap = get_net_snapshot()
         now = time.monotonic()
+        # Capture dt against the *previous* snapshot before we clobber
+        # self.prev_time below. Disk-I/O sampling uses the same dt.
+        prev_time = self.prev_time
+        if prev_time is not None and prev_time < now:
+            tick_dt = now - prev_time
+        else:
+            tick_dt = 0.0
         if self.prev_net and self.prev_time:
-            dt = now - self.prev_time
+            dt = tick_dt
             if dt > 0:
                 new_rates = {}
                 for p in all_procs:
@@ -3503,6 +3601,38 @@ class ProcMonUI:
             snap = net_snap.get(p["pid"])
             p["bytes_in"] = snap[0] if snap else 0
             p["bytes_out"] = snap[1] if snap else 0
+
+        # Per-process disk I/O — sample cumulative bytes via libproc rusage,
+        # then derive a B/s rate by diffing against the prior snapshot. Same
+        # dt as the net rates above so the two columns line up.
+        new_disk_snap = {}
+        new_disk_rates = {}
+        prev_disk = self._prev_disk_io
+        disk_dt = tick_dt
+        for p in all_procs:
+            pid = p["pid"]
+            br, bw = _get_disk_io(pid)
+            if br is None or bw is None:
+                p["disk_bytes_in"] = 0
+                p["disk_bytes_out"] = 0
+                p["disk_in"] = -1
+                p["disk_out"] = -1
+                continue
+            new_disk_snap[pid] = (br, bw)
+            p["disk_bytes_in"] = br
+            p["disk_bytes_out"] = bw
+            prev = prev_disk.get(pid)
+            if prev and disk_dt > 0:
+                rate_in = max(0.0, (br - prev[0]) / disk_dt)
+                rate_out = max(0.0, (bw - prev[1]) / disk_dt)
+                new_disk_rates[pid] = (rate_in, rate_out)
+                p["disk_in"] = rate_in
+                p["disk_out"] = rate_out
+            else:
+                p["disk_in"] = -1
+                p["disk_out"] = -1
+        self._prev_disk_io = new_disk_snap
+        self._disk_io_rates = new_disk_rates
 
         matched = [p for p in all_procs
                    if p["pid"] not in _PHANTOM_TREE_PARENTS
@@ -4031,13 +4161,31 @@ class ProcMonUI:
         if has_ch:
             net_line += f"  [group: \u2193 {fmt_rate(agg_ni)}  \u2191 {fmt_rate(agg_no)}]"
 
+        # Per-process disk I/O rate (proc_pid_rusage). Only show the line if
+        # we have a successful sample \u2014 otherwise it's noise.
+        disk_in = r.get("disk_in", -1)
+        disk_out = r.get("disk_out", -1)
+        dbi = r.get("disk_bytes_in", 0)
+        dbo = r.get("disk_bytes_out", 0)
+        disk_line = None
+        if disk_in >= 0 or disk_out >= 0 or dbi or dbo:
+            rate_part = (f"\u2193 {fmt_rate(max(disk_in, 0))}  "
+                         f"\u2191 {fmt_rate(max(disk_out, 0))}")
+            total_part = (f"  [total: read {fmt_mem(dbi // 1024)} / "
+                          f"written {fmt_mem(dbo // 1024)}]")
+            disk_line = f"Disk: {rate_part}{total_part}"
+
         raw = [
             pid_line,
             mem_line,
             net_line,
+        ]
+        if disk_line is not None:
+            raw.append(disk_line)
+        raw.extend([
             f"CWD: {r.get('cwd', '-')}",
             f"CMD: {r['command']}",
-        ]
+        ])
 
         return raw
 
@@ -7923,13 +8071,28 @@ class ProcMonUI:
             parts.append(
                 f"The user is looking at the main process list with "
                 f"PID {r['pid']} selected. Selected process details:")
+            disk_in = r.get("disk_in", -1)
+            disk_out = r.get("disk_out", -1)
+            disk_line = ""
+            if disk_in >= 0 or disk_out >= 0:
+                disk_line = (
+                    f"\n  disk_io_rate: ↓ {max(disk_in, 0):.0f} B/s "
+                    f"↑ {max(disk_out, 0):.0f} B/s")
+            disk_total = ""
+            dbi = r.get("disk_bytes_in", 0)
+            dbo = r.get("disk_bytes_out", 0)
+            if dbi or dbo:
+                disk_total = (
+                    f"\n  disk_io_total: read {dbi:,} B / "
+                    f"written {dbo:,} B")
             parts.append(
                 f"  command: {r['command']}\n"
                 f"  ppid: {r.get('ppid')}\n"
                 f"  cpu: {r.get('cpu', 0):.1f}%\n"
                 f"  memory: {r.get('rss_kb', 0)} KB\n"
                 f"  threads: {r.get('threads', 0)}\n"
-                f"  fds: {r.get('fds', '?')}")
+                f"  fds: {r.get('fds', '?')}"
+                f"{disk_line}{disk_total}")
         else:
             label = "Process list"
             parts.append("The user is looking at the main process list.")

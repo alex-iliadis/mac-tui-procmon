@@ -46,6 +46,8 @@ def monitor():
     mon.prev_net = {}
     mon.prev_time = None
     mon.net_rates = {}
+    mon._prev_disk_io = {}
+    mon._disk_io_rates = {}
     mon.sort_mode = procmon.SORT_MEM
     mon._sort_inverted = False
     mon._dynamic_sort = False

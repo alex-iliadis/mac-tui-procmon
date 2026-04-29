@@ -26,6 +26,7 @@ env/
 # AI / Claude
 CLAUDE.md
 .claude/
+.synthesi/
 
 # Secrets / Config
 .env

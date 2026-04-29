@@ -4,6 +4,7 @@
 3. LLM executive summary across audits / keyscan / hidden / inspect
 4. Events → LLM analysis on stop
 """
+import ctypes
 import json
 import os
 import shutil
@@ -417,3 +418,128 @@ class TestTrafficInspector:
         # _shutdown() calls _stop_traffic_stream, which calls terminate()
         # (and falls through to kill only on timeout). Either counts.
         assert fake_proc.terminate.called or fake_proc.kill.called
+
+
+# ── 5. Per-process disk I/O bytes (proc_pid_rusage) ─────────────────────
+
+
+class TestDiskIoHelper:
+    def test_get_disk_io_returns_pair_on_success(self):
+        # Simulate libproc filling in disk byte counts. We swap the struct
+        # constructor for one that pre-populates the diskio fields, then
+        # have proc_pid_rusage just return 0 (success). The "as if filled
+        # by the kernel" approximation is faithful enough — we're testing
+        # that _get_disk_io correctly propagates ri_diskio_* into a tuple.
+        class _Prefilled(procmon.rusage_info_v4):
+            def __init__(self):
+                super().__init__()
+                self.ri_diskio_bytesread = 1024
+                self.ri_diskio_byteswritten = 2048
+        with patch.object(procmon, "rusage_info_v4", _Prefilled), \
+             patch.object(procmon._libproc, "proc_pid_rusage",
+                          return_value=0):
+            br, bw = procmon._get_disk_io(1234)
+        assert br == 1024
+        assert bw == 2048
+
+    def test_get_disk_io_returns_none_on_failure(self):
+        with patch.object(procmon._libproc, "proc_pid_rusage",
+                          return_value=-1):
+            br, bw = procmon._get_disk_io(1234)
+        assert br is None
+        assert bw is None
+
+    def test_get_disk_io_invalid_pid(self):
+        br, bw = procmon._get_disk_io(0)
+        assert br is None and bw is None
+
+    def test_get_disk_io_handles_oserror(self):
+        with patch.object(procmon._libproc, "proc_pid_rusage",
+                          side_effect=OSError("boom")):
+            br, bw = procmon._get_disk_io(1234)
+        assert br is None and bw is None
+
+
+class TestDiskIoCollect:
+    def test_collect_data_populates_disk_fields(self, monitor):
+        # First refresh: cumulative snapshot only, no rate yet (no prior).
+        proc_a = {"pid": 100, "ppid": 1, "cpu": 0.0, "rss_kb": 0,
+                  "threads": 1, "command": "/bin/x", "cpu_ticks": 0}
+        with patch("procmon.get_all_processes", return_value=[proc_a]), \
+             patch("procmon.get_net_snapshot", return_value={}), \
+             patch("procmon.get_fd_counts", return_value={}), \
+             patch("procmon.get_cwds", return_value={}), \
+             patch("procmon._get_disk_io", return_value=(1000, 2000)):
+            monitor.collect_data()
+        assert proc_a["disk_bytes_in"] == 1000
+        assert proc_a["disk_bytes_out"] == 2000
+        # First sample → no rate yet
+        assert proc_a["disk_in"] == -1
+
+    def test_collect_data_computes_disk_rate(self, monitor):
+        # Two refreshes 1s apart → rate = (new - old) / dt.
+        monitor.prev_time = 100.0
+        monitor._prev_disk_io = {100: (1000, 2000)}
+        proc_a = {"pid": 100, "ppid": 1, "cpu": 0.0, "rss_kb": 0,
+                  "threads": 1, "command": "/bin/x", "cpu_ticks": 0}
+        with patch("procmon.get_all_processes", return_value=[proc_a]), \
+             patch("procmon.get_net_snapshot", return_value={}), \
+             patch("procmon.get_fd_counts", return_value={}), \
+             patch("procmon.get_cwds", return_value={}), \
+             patch("procmon.time.monotonic", return_value=101.0), \
+             patch("procmon._get_disk_io", return_value=(2000, 4000)):
+            monitor.collect_data()
+        # 1000 bytes read in 1s → 1000 B/s
+        assert abs(proc_a["disk_in"] - 1000.0) < 0.5
+        assert abs(proc_a["disk_out"] - 2000.0) < 0.5
+
+    def test_collect_data_handles_disk_io_unavailable(self, monitor):
+        proc_a = {"pid": 100, "ppid": 1, "cpu": 0.0, "rss_kb": 0,
+                  "threads": 1, "command": "/bin/x", "cpu_ticks": 0}
+        with patch("procmon.get_all_processes", return_value=[proc_a]), \
+             patch("procmon.get_net_snapshot", return_value={}), \
+             patch("procmon.get_fd_counts", return_value={}), \
+             patch("procmon.get_cwds", return_value={}), \
+             patch("procmon._get_disk_io", return_value=(None, None)):
+            monitor.collect_data()
+        assert proc_a["disk_bytes_in"] == 0
+        assert proc_a["disk_bytes_out"] == 0
+        assert proc_a["disk_in"] == -1
+        assert proc_a["disk_out"] == -1
+
+
+class TestDiskIoDisplay:
+    def test_detail_lines_includes_disk_when_present(self, monitor):
+        from tests.conftest import make_proc
+        r = make_proc(pid=100)
+        r["disk_in"] = 1024.0
+        r["disk_out"] = 2048.0
+        r["disk_bytes_in"] = 1_048_576
+        r["disk_bytes_out"] = 2_097_152
+        monitor.rows = [r]
+        monitor.selected = 0
+        lines = monitor._detail_lines(120)
+        joined = "\n".join(lines)
+        assert "Disk:" in joined
+
+    def test_detail_lines_omits_disk_when_unavailable(self, monitor):
+        from tests.conftest import make_proc
+        r = make_proc(pid=100)
+        # No disk fields set → helper should suppress the line.
+        monitor.rows = [r]
+        monitor.selected = 0
+        lines = monitor._detail_lines(120)
+        joined = "\n".join(lines)
+        assert "Disk:" not in joined
+
+    def test_chat_context_includes_disk_for_selected_proc(self, monitor):
+        from tests.conftest import make_proc
+        r = make_proc(pid=100)
+        r["disk_in"] = 1024.0
+        r["disk_out"] = 2048.0
+        r["disk_bytes_in"] = 1_048_576
+        r["disk_bytes_out"] = 2_097_152
+        monitor.rows = [r]
+        monitor.selected = 0
+        label, text = monitor._collect_chat_context()
+        assert "disk_io_rate" in text or "disk_io_total" in text
