@@ -3384,6 +3384,16 @@ class ProcMonUI:
         self._galaxy_known_pids = set()
         self._galaxy_node_cap = 80
         self._galaxy_iter_step = 0.5  # spring step length
+        # ── Feature 8: Process Lifecycle DVR ────────────────────────
+        # Gantt-style horizontal timeline. Each refresh tick captures a
+        # snapshot of which PIDs were alive; the renderer paints a row
+        # per PID with green blocks for "alive" cells.
+        self._lifecycle_mode = False
+        self._lifecycle_snapshots = collections.deque(maxlen=300)
+        self._lifecycle_cursor = -1   # -1 = live tail
+        self._lifecycle_playing = True
+        self._lifecycle_max_rows = 60
+        self._lifecycle_min_alive_cells = 1
         # Test-only TUI report capture. This is intentionally opt-in so the
         # normal user-facing UI stays unchanged. The harness uses it to export
         # the exact detail-pane buffer for post-run assertions.
@@ -4266,6 +4276,14 @@ class ProcMonUI:
         except Exception:
             pass
 
+        # Feature 8: Process Lifecycle DVR — snapshot the live PID set so
+        # the DVR view can render a Gantt timeline. Metadata captures
+        # the command name so labels survive process exits.
+        try:
+            self._capture_lifecycle_snapshot(all_procs)
+        except Exception:
+            pass
+
         # Restore selection by PID
         if sel_pid is not None:
             for i, r in enumerate(self.rows):
@@ -4380,7 +4398,13 @@ class ProcMonUI:
             return
 
         # ── Compute detail box content and height ──
-        if self._galaxy_mode:
+        if self._lifecycle_mode:
+            detail_all_lines = self._build_lifecycle_lines(w, h)
+            detail_title = (f"Process Lifecycle DVR — "
+                             f"{len(self._lifecycle_snapshots)} snapshots")
+            max_detail_h = max(10, (h - y) * 4 // 5)
+            detail_h = min(len(detail_all_lines) + 2, max_detail_h)
+        elif self._galaxy_mode:
             detail_all_lines = self._build_galaxy_lines(w, h)
             detail_title = (f"Process Galaxy — {len(self._galaxy_positions)} "
                              f"nodes")
@@ -5102,15 +5126,14 @@ class ProcMonUI:
                 ("F", "Process"),
                 ("N", "Net"),
                 ("T", "Triage"),
-                ("U", "PIDlog"),
                 ("o", "Oscope"),
                 ("G", "Galaxy"),
+                ("D", "DVR"),
                 ("r", "Replay"),
                 ("?", "Ask"),
                 ("\\", "Narrator"),
                 ("L", "Log"),
                 ("f", "Filter"),
-                ("PgU/D", "Page"),
                 ("k", "Kill"),
                 ("q", "Quit"),
             ]
@@ -5313,6 +5336,26 @@ class ProcMonUI:
                 elif key == ord("q"):
                     return False
                 return True
+            elif self._lifecycle_mode:
+                # Feature 8: Lifecycle DVR scrubbing.
+                if key == curses.KEY_LEFT:
+                    self._lifecycle_step(-1)
+                elif key == curses.KEY_RIGHT:
+                    self._lifecycle_step(1)
+                elif key == curses.KEY_PPAGE:
+                    self._lifecycle_step(-10)
+                elif key == curses.KEY_NPAGE:
+                    self._lifecycle_step(10)
+                elif key == ord(" "):
+                    self._lifecycle_jump_live()
+                elif key == ord("\t"):
+                    self._detail_focus = False
+                elif key == 27:
+                    self._lifecycle_mode = False
+                    self._detail_focus = False
+                elif key == ord("q"):
+                    return False
+                return True
             else:
                 # Net mode detail focus
                 n = len(self._net_entries) or 1
@@ -5397,6 +5440,8 @@ class ProcMonUI:
             self._toggle_oscilloscope_mode()
         elif key == ord("G"):
             self._toggle_galaxy_mode()
+        elif key == ord("D"):
+            self._toggle_lifecycle_mode()
         elif key == ord("r"):
             # Feature 5: enter Attack Chain Replay if a buffer was captured.
             if self._replay_mode:
@@ -5412,7 +5457,8 @@ class ProcMonUI:
                     or self._unified_log_mode
                     or self._oscilloscope_mode
                     or self._replay_mode
-                    or self._galaxy_mode):
+                    or self._galaxy_mode
+                    or self._lifecycle_mode):
                 self._detail_focus = True
         elif key == ord("C"):  # Shift+C — alert config
             self._prompt_config()
@@ -5421,7 +5467,10 @@ class ProcMonUI:
         elif key == ord("k"):
             self._kill_selected()
         elif key == 27:  # Escape
-            if self._galaxy_mode:
+            if self._lifecycle_mode:
+                self._lifecycle_mode = False
+                self._detail_focus = False
+            elif self._galaxy_mode:
                 self._galaxy_mode = False
                 self._detail_focus = False
             elif self._replay_mode:
@@ -5741,6 +5790,133 @@ class ProcMonUI:
             steps += 1
             if steps > 4 * (w + h):  # safety guard
                 break
+
+    # ── Feature 8: Process Lifecycle DVR ───────────────────────────────
+
+    def _capture_lifecycle_snapshot(self, all_procs):
+        """Append a (timestamp, pid_set, metadata) entry to the buffer."""
+        ts = time.monotonic()
+        pid_set = set()
+        meta = {}
+        for p in all_procs:
+            pid = p.get("pid")
+            if pid is None:
+                continue
+            pid_set.add(pid)
+            cmd = p.get("command", "") or ""
+            meta[pid] = (cmd.split()[0].rsplit("/", 1)[-1][:24]
+                          if cmd else str(pid))
+        self._lifecycle_snapshots.append((ts, pid_set, meta))
+
+    def _toggle_lifecycle_mode(self):
+        """Toggle the Gantt-style PID timeline view (key: D)."""
+        if self._lifecycle_mode:
+            self._lifecycle_mode = False
+            self._detail_focus = False
+            return
+        self._lifecycle_mode = True
+        # Mutual exclusion with other modes
+        self._inspect_mode = False
+        self._net_mode = False
+        self._audit_mode = False
+        self._oscilloscope_mode = False
+        if getattr(self, "_events_mode", False):
+            self._stop_events_stream()
+            self._events_mode = False
+        self._galaxy_mode = False
+        self._lifecycle_cursor = -1
+        self._lifecycle_playing = True
+        self._detail_focus = True
+
+    def _lifecycle_select_pids(self, snapshots):
+        """Pick PIDs that were alive in at least N snapshots so the row
+        list doesn't explode. Sorted by time-of-first-appearance.
+        """
+        first_seen = {}
+        alive_count = {}
+        for idx, (_ts, pid_set, _meta) in enumerate(snapshots):
+            for pid in pid_set:
+                if pid not in first_seen:
+                    first_seen[pid] = idx
+                alive_count[pid] = alive_count.get(pid, 0) + 1
+        candidates = [
+            pid for pid, c in alive_count.items()
+            if c >= self._lifecycle_min_alive_cells
+        ]
+        candidates.sort(key=lambda p: (first_seen.get(p, 0), p))
+        return candidates[:self._lifecycle_max_rows]
+
+    def _build_lifecycle_lines(self, w, h):
+        """Build display lines for the lifecycle DVR Gantt view."""
+        snapshots = list(self._lifecycle_snapshots)
+        if not snapshots:
+            return [" No lifecycle snapshots yet — wait for the next refresh."]
+        n = len(snapshots)
+        # Right-align the timeline so most-recent is at the right edge.
+        bar_w = max(20, w - 32)
+        # Window the snapshots to bar_w cells.
+        start = max(0, n - bar_w)
+        window = snapshots[start:]
+        cursor_window_idx = (n - 1 if self._lifecycle_cursor < 0
+                              else max(0, min(n - 1, self._lifecycle_cursor)) - start)
+        if cursor_window_idx < 0 or cursor_window_idx >= len(window):
+            cursor_window_idx = len(window) - 1
+        pids = self._lifecycle_select_pids(window)
+        lines = []
+        # Header line
+        playing = "▶ live" if self._lifecycle_cursor < 0 else "⏸ frozen"
+        lines.append(
+            f" Lifecycle DVR  [{playing}]  buffer={n}  rows={len(pids)}")
+        lines.append("")
+        max_rows = max(1, h - 8)
+        pids = pids[:max_rows]
+        # Row per pid: "label  bar"
+        # Build a metadata lookup from the most recent snapshot that has it.
+        meta_lookup = {}
+        for _ts, _pids, m in reversed(window):
+            for pid, label in m.items():
+                meta_lookup.setdefault(pid, label)
+        for pid in pids:
+            label = meta_lookup.get(pid, str(pid))
+            cells = []
+            for i, (_ts, pid_set, _m) in enumerate(window):
+                if pid in pid_set:
+                    cells.append("█")
+                else:
+                    # Faint dim if the pid was alive in the prior cell
+                    # (just exited)
+                    cells.append(" ")
+            # Cursor marker — replace cell with overline when frozen
+            if 0 <= cursor_window_idx < len(cells):
+                if cells[cursor_window_idx] == "█":
+                    cells[cursor_window_idx] = "▓"
+                else:
+                    cells[cursor_window_idx] = "│"
+            row = f" {label[:18]:<18} | {''.join(cells)}"
+            lines.append(row)
+        # Bottom timeline marker
+        lines.append("")
+        marker_line = list(" " * len(window))
+        if 0 <= cursor_window_idx < len(marker_line):
+            marker_line[cursor_window_idx] = "▲"
+        lines.append(" " + " " * 18 + "   " + "".join(marker_line))
+        return lines
+
+    def _lifecycle_step(self, delta):
+        """Step the cursor; -1 means live tail."""
+        n = len(self._lifecycle_snapshots)
+        if n == 0:
+            return
+        if self._lifecycle_cursor < 0:
+            self._lifecycle_cursor = n - 1
+        self._lifecycle_cursor = max(0, min(n - 1,
+                                             self._lifecycle_cursor + delta))
+        # Frozen → not playing
+        self._lifecycle_playing = False
+
+    def _lifecycle_jump_live(self):
+        self._lifecycle_cursor = -1
+        self._lifecycle_playing = True
 
     # ── Feature 7: Process Galaxy ──────────────────────────────────────
 

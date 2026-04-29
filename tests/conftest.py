@@ -255,5 +255,13 @@ def monitor():
     mon._galaxy_known_pids = set()
     mon._galaxy_node_cap = 80
     mon._galaxy_iter_step = 0.5
+    # Feature 8: Process Lifecycle DVR
+    import collections as _c_lifecycle
+    mon._lifecycle_mode = False
+    mon._lifecycle_snapshots = _c_lifecycle.deque(maxlen=300)
+    mon._lifecycle_cursor = -1
+    mon._lifecycle_playing = True
+    mon._lifecycle_max_rows = 60
+    mon._lifecycle_min_alive_cells = 1
     mon._test_select_pid = 0
     return mon

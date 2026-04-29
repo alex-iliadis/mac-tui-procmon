@@ -693,3 +693,86 @@ class TestProcessGalaxy:
         assert len(lines) == 18
         # All same width
         assert len({len(l) for l in lines}) == 1
+
+
+# ── 8. Process Lifecycle DVR ──────────────────────────────────────────
+
+
+class TestLifecycleDVR:
+    def test_capture_snapshot_appends(self, monitor):
+        monitor._capture_lifecycle_snapshot([
+            {"pid": 1, "command": "/bin/init"},
+            {"pid": 2, "command": "/bin/x"},
+        ])
+        assert len(monitor._lifecycle_snapshots) == 1
+        ts, pids, meta = monitor._lifecycle_snapshots[0]
+        assert pids == {1, 2}
+        assert meta[1] == "init"
+
+    def test_ring_buffer_truncates(self, monitor):
+        # Drop the buffer to a tiny one so the test is fast.
+        import collections
+        monitor._lifecycle_snapshots = collections.deque(maxlen=5)
+        for i in range(20):
+            monitor._capture_lifecycle_snapshot([{"pid": i, "command": "p"}])
+        assert len(monitor._lifecycle_snapshots) == 5
+
+    def test_select_pids_filters_by_alive_count(self, monitor):
+        snapshots = [
+            (0, {1, 2}, {1: "a", 2: "b"}),
+            (1, {1}, {1: "a"}),
+        ]
+        monitor._lifecycle_min_alive_cells = 2
+        pids = monitor._lifecycle_select_pids(snapshots)
+        # pid 1 alive in both; pid 2 alive in one only
+        assert pids == [1]
+
+    def test_select_pids_caps_max_rows(self, monitor):
+        monitor._lifecycle_max_rows = 3
+        snapshots = [(0, {i for i in range(20)},
+                       {i: f"p{i}" for i in range(20)})]
+        pids = monitor._lifecycle_select_pids(snapshots)
+        assert len(pids) == 3
+
+    def test_toggle_mode(self, monitor):
+        monitor._toggle_lifecycle_mode()
+        assert monitor._lifecycle_mode is True
+        monitor._toggle_lifecycle_mode()
+        assert monitor._lifecycle_mode is False
+
+    def test_step_freezes_playback(self, monitor):
+        monitor._lifecycle_snapshots.extend([
+            (0, {1}, {1: "a"}), (1, {1, 2}, {1: "a", 2: "b"})])
+        monitor._lifecycle_cursor = -1
+        monitor._lifecycle_playing = True
+        monitor._lifecycle_step(-1)
+        assert monitor._lifecycle_playing is False
+        # Cursor frozen somewhere in [0, n-1]
+        assert 0 <= monitor._lifecycle_cursor <= 1
+
+    def test_jump_live_resumes_playback(self, monitor):
+        monitor._lifecycle_cursor = 5
+        monitor._lifecycle_playing = False
+        monitor._lifecycle_jump_live()
+        assert monitor._lifecycle_cursor == -1
+        assert monitor._lifecycle_playing is True
+
+    def test_build_lifecycle_lines_renders_blocks(self, monitor):
+        # Three snapshots — pid 1 in all, pid 2 in last two.
+        monitor._lifecycle_snapshots.extend([
+            (0, {1}, {1: "init"}),
+            (1, {1, 2}, {1: "init", 2: "child"}),
+            (2, {1, 2}, {1: "init", 2: "child"}),
+        ])
+        lines = monitor._build_lifecycle_lines(120, 30)
+        joined = "\n".join(lines)
+        assert "Lifecycle DVR" in joined
+        assert "init" in joined
+        assert "child" in joined
+        # Block glyph somewhere
+        assert "█" in joined or "▓" in joined
+
+    def test_build_lifecycle_empty_buffer(self, monitor):
+        lines = monitor._build_lifecycle_lines(80, 20)
+        joined = "\n".join(lines)
+        assert "No lifecycle snapshots" in joined
