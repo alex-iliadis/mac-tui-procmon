@@ -3343,6 +3343,17 @@ class ProcMonUI:
         self._oscilloscope_mode = False
         self._oscilloscope_pid = None
         self._oscilloscope_scroll = 0
+        # ── Feature 4: Three-Model Consensus Race ────────────────────
+        # While Inspect runs, claude/codex/gemini stream their analyses
+        # into three side-by-side lanes. The risk bar fills 33% per
+        # finished lane.
+        self._consensus_lanes = {"claude": [], "codex": [], "gemini": []}
+        self._consensus_lane_lock = threading.Lock()
+        self._consensus_lane_done = {"claude": False, "codex": False,
+                                      "gemini": False}
+        self._consensus_risk_bar = 0  # percentage 0..100
+        self._consensus_running = False
+        self._consensus_lane_max_lines = 60
         # Test-only TUI report capture. This is intentionally opt-in so the
         # normal user-facing UI stays unchanged. The harness uses it to export
         # the exact detail-pane buffer for post-run assertions.
@@ -4353,12 +4364,16 @@ class ProcMonUI:
             max_detail_h = max(10, (h - y) * 3 // 4)
             detail_h = min(len(detail_all_lines) + 2, max_detail_h)
         elif self._inspect_mode:
-            if self._inspect_lines:
+            if self._inspect_lines and not self._consensus_running:
                 detail_all_lines = list(self._inspect_lines)
                 summary = (self._llm_summary.get("inspect")
                            or self._llm_summary_loading_banner("inspect"))
                 if summary:
                     detail_all_lines = summary + detail_all_lines
+            elif self._inspect_loading and self._consensus_running:
+                # Feature 4: Three-Model Consensus Race \u2014 render side-by-
+                # side lanes while the LLMs stream their analyses.
+                detail_all_lines = self._build_consensus_race_lines(w)
             elif self._inspect_loading:
                 phase = self._inspect_phase
                 if phase == "collecting":
@@ -7938,7 +7953,12 @@ class ProcMonUI:
             return f"[{tool} CLI error: {e}]"
 
     def _run_llms_parallel(self, artifacts):
-        """Run Claude, Codex, Gemini in parallel. Returns dict tool -> response."""
+        """Run Claude, Codex, Gemini in parallel. Returns dict tool -> response.
+
+        When the consensus race is enabled at the inspect-mode level,
+        the inspect worker calls `_run_llms_parallel_streaming` instead
+        and the lanes get populated live.
+        """
         input_text = self._build_analysis_input(artifacts)
         results = {}
         threads = []
@@ -7957,6 +7977,197 @@ class ProcMonUI:
             if tool not in results:
                 results[tool] = f"[{tool} join timeout]"
         return results
+
+    def _run_llms_parallel_streaming(self, artifacts):
+        """Streaming variant of `_run_llms_parallel` for the consensus race.
+
+        Output of each tool lands in `_consensus_lanes[tool]` in real
+        time so the UI can render the race. Lane state is reset on
+        entry so a fresh inspect doesn't show stale lines.
+        """
+        input_text = self._build_analysis_input(artifacts)
+        results = {}
+        threads = []
+        with self._consensus_lane_lock:
+            self._consensus_lanes = {"claude": [], "codex": [], "gemini": []}
+            self._consensus_lane_done = {"claude": False, "codex": False,
+                                          "gemini": False}
+        self._consensus_risk_bar = 0
+        self._consensus_running = True
+
+        def _on_chunk(label, line):
+            with self._consensus_lane_lock:
+                lane = self._consensus_lanes.setdefault(label, [])
+                lane.append(line.rstrip("\n"))
+                if len(lane) > self._consensus_lane_max_lines:
+                    del lane[:len(lane) - self._consensus_lane_max_lines]
+
+        def _worker(tool):
+            try:
+                results[tool] = self._run_llm_streaming(
+                    tool, self._ANALYSIS_PROMPT, input_text, _on_chunk)
+            finally:
+                with self._consensus_lane_lock:
+                    self._consensus_lane_done[tool] = True
+                done_count = sum(1 for v in self._consensus_lane_done.values()
+                                  if v)
+                self._consensus_risk_bar = int(done_count / 3.0 * 100)
+
+        for tool in ("claude", "codex", "gemini"):
+            t = threading.Thread(target=_worker, args=(tool,), daemon=True)
+            t.start()
+            threads.append(t)
+        for t in threads:
+            t.join(timeout=180)
+        for tool in ("claude", "codex", "gemini"):
+            if tool not in results:
+                results[tool] = f"[{tool} join timeout]"
+        self._consensus_running = False
+        return results
+
+    def _run_llm_streaming(self, tool, prompt, input_text, on_chunk):
+        """Streaming variant of _run_llm.
+
+        Reads stdout *line by line* via `proc.stdout.readline()` so the
+        UI sees output as it arrives. `on_chunk(tool, line)` is called
+        for each emitted line. Returns the full concatenated text.
+        """
+        cfg = self._LLM_TOOLS.get(tool)
+        if cfg is None:
+            return f"[unknown tool: {tool}]"
+        argv = cfg["argv"](prompt)
+        env = {
+            **os.environ,
+            "PATH": _USER_TOOL_PATH,
+            "HOME": _EFFECTIVE_HOME,
+        }
+        sudo_user = os.environ.get("SUDO_USER")
+        if sudo_user:
+            env["USER"] = sudo_user
+            env["LOGNAME"] = sudo_user
+        try:
+            proc = subprocess.Popen(
+                argv,
+                stdin=subprocess.PIPE if cfg["uses_stdin"] else subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+                bufsize=0,  # unbuffered binary stream → readline() flushes promptly
+            )
+        except FileNotFoundError:
+            err = f"[{tool} CLI not found — install: {cfg['install_hint']}]"
+            on_chunk(tool, err)
+            return err
+        except OSError as e:
+            err = f"[{tool} CLI error: {e}]"
+            on_chunk(tool, err)
+            return err
+
+        # Send stdin (best effort, in a thread so a slow CLI can't deadlock us).
+        def _writer():
+            try:
+                if cfg["uses_stdin"] and proc.stdin:
+                    proc.stdin.write(input_text.encode("utf-8"))
+                    proc.stdin.close()
+            except Exception:
+                pass
+        threading.Thread(target=_writer, daemon=True).start()
+
+        collected = []
+        try:
+            for raw in iter(proc.stdout.readline, b""):
+                if not raw:
+                    break
+                line = raw.decode("utf-8", errors="replace")
+                collected.append(line)
+                try:
+                    on_chunk(tool, line)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=180)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            timeout_msg = f"[{tool} streaming timeout]"
+            on_chunk(tool, timeout_msg)
+            return "".join(collected) + timeout_msg
+        if proc.returncode != 0:
+            try:
+                err = proc.stderr.read().decode("utf-8", errors="replace") if proc.stderr else ""
+            except Exception:
+                err = ""
+            tag = f"[{tool} CLI error rc={proc.returncode}: {err.strip()[:200]}]"
+            on_chunk(tool, tag)
+            return "".join(collected) + tag
+        return "".join(collected).strip()
+
+    def _consensus_lane_divergence(self):
+        """Inspect lane content for RISK lines and report divergence.
+
+        Returns (divergent: bool, level_set: set[str]). When fewer than
+        two lanes have emitted a RISK line yet, returns (False, set()).
+        """
+        levels = set()
+        with self._consensus_lane_lock:
+            for tool, lane in self._consensus_lanes.items():
+                for line in lane:
+                    if "RISK:" in line:
+                        # Last RISK line wins (LLMs sometimes restate it)
+                        try:
+                            level = line.split("RISK:", 1)[1].strip().split()[0]
+                        except IndexError:
+                            level = ""
+                        if level:
+                            levels.add(level.upper())
+                            break
+        if len(levels) < 2:
+            return False, levels
+        return True, levels
+
+    def _build_consensus_race_lines(self, width):
+        """Render claude/codex/gemini lane state as side-by-side panels."""
+        lanes_order = ("claude", "codex", "gemini")
+        lane_w = max(20, (width - 6) // 3)
+        spinner = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+        spin_idx = int(time.monotonic() * 8) % len(spinner)
+        with self._consensus_lane_lock:
+            lanes = {k: list(self._consensus_lanes.get(k, []))
+                     for k in lanes_order}
+            done = dict(self._consensus_lane_done)
+        # Header row
+        headers = []
+        for tool in lanes_order:
+            mark = "✓" if done.get(tool) else spinner[spin_idx]
+            headers.append(f"{mark} {tool}".ljust(lane_w))
+        out = [" " + " ".join(headers)]
+        out.append(" " + " ".join("─" * lane_w for _ in lanes_order))
+        # Body — last N lines per lane.
+        max_body = 14
+        body_per = {tool: lanes[tool][-max_body:] for tool in lanes_order}
+        body_h = max(len(v) for v in body_per.values()) if any(body_per.values()) else 1
+        for ri in range(body_h):
+            row_parts = []
+            for tool in lanes_order:
+                lane = body_per[tool]
+                ln = lane[ri] if ri < len(lane) else ""
+                row_parts.append(ln[:lane_w].ljust(lane_w))
+            out.append(" " + " ".join(row_parts))
+        out.append("")
+        # Risk bar.
+        bar_total = max(20, width - 30)
+        filled = int(bar_total * self._consensus_risk_bar / 100)
+        bar = "█" * filled + "·" * (bar_total - filled)
+        finished = sum(1 for v in done.values() if v)
+        out.append(f" CONSENSUS_RISK [{bar}] {finished}/3 ready")
+        # Divergence flasher.
+        diverge, levels = self._consensus_lane_divergence()
+        if diverge:
+            out.append(" ⚠ DIVERGENCE — lanes disagree: "
+                       + ", ".join(sorted(levels)))
+        return out
 
     def _synthesize_analyses(self, analyses):
         """Ask one LLM to consolidate the three reports into a consensus.
@@ -8065,9 +8276,12 @@ class ProcMonUI:
             report_lines = self._format_inspect_report(artifacts)
             self._inspect_pending = ("artifacts", report_lines)
 
-            # Run all three LLMs in parallel
+            # Run all three LLMs in parallel. The streaming variant
+            # populates `_consensus_lanes` so the UI shows the race
+            # while the analyses are coming in. Falls through to the
+            # existing synthesis path with the same dict shape.
             self._inspect_phase = "analyzing"
-            analyses = self._run_llms_parallel(artifacts)
+            analyses = self._run_llms_parallel_streaming(artifacts)
 
             # Append each per-tool analysis
             analysis_lines = []

@@ -157,14 +157,16 @@ class TestNarrator:
                               rss_kb=4 * 1024 * 1024)]
         monitor._narrator_enabled = True
         monitor._narrator_last_tick = 0.0
+        # Belt-and-suspenders: enable test_mode AND patch the caption
+        # generator so even if the worker thread out-races the
+        # context-manager exit it doesn't shell out for real.
+        monitor._test_mode = True
         with patch.object(monitor, "_narrator_generate_caption",
                            return_value="PID 7 is spiking."):
             monitor._maybe_run_narrator()
-            # Wait for worker
-            for _ in range(50):
-                if monitor._narrator_pending is not None:
-                    break
-                time.sleep(0.02)
+            worker = monitor._narrator_worker
+            if worker is not None:
+                worker.join(timeout=5.0)
         assert monitor._narrator_target_pid == 7
         assert monitor._narrator_pending == "PID 7 is spiking."
 
@@ -289,3 +291,120 @@ class TestOscilloscope:
                        "Disk R B/s", "Disk W B/s", "GPU %", "FDs",
                        "Mach ports"):
             assert needed in labels
+
+
+# ── 4. Three-Model Consensus Race ─────────────────────────────────────
+
+
+class TestConsensusRace:
+    def test_lane_state_init(self, monitor):
+        assert set(monitor._consensus_lanes.keys()) == {
+            "claude", "codex", "gemini"}
+        assert monitor._consensus_running is False
+        assert monitor._consensus_risk_bar == 0
+
+    def test_run_llms_parallel_streaming_resets_lanes(self, monitor):
+        monitor._consensus_lanes = {"claude": ["stale"], "codex": ["stale"],
+                                     "gemini": ["stale"]}
+        # Replace streaming runner with a fake that emits one line then quits.
+        def fake_stream(tool, prompt, input_text, on_chunk):
+            on_chunk(tool, f"first line from {tool}")
+            on_chunk(tool, f"RISK: HIGH from {tool}")
+            return f"DONE {tool}"
+        monitor._build_analysis_input = lambda artifacts: "x"
+        with patch.object(monitor, "_run_llm_streaming",
+                           side_effect=fake_stream):
+            results = monitor._run_llms_parallel_streaming(
+                {"pid": 1, "exe_path": "/bin/x"})
+        assert set(results.keys()) == {"claude", "codex", "gemini"}
+        # Lane state populated for each tool
+        for tool in ("claude", "codex", "gemini"):
+            assert any(tool in line for line in monitor._consensus_lanes[tool])
+        # Risk bar advanced to 100% after all three finish
+        assert monitor._consensus_risk_bar == 100
+        # done flags all set
+        assert all(monitor._consensus_lane_done.values())
+        # _consensus_running clears at the end
+        assert monitor._consensus_running is False
+
+    def test_legacy_run_llms_parallel_unchanged(self, monitor):
+        """The original (non-streaming) path still calls `_run_llm` so the
+        old test_inspect_hidden coverage doesn't break."""
+        with patch.object(monitor, "_build_analysis_input",
+                           return_value="x"):
+            with patch.object(monitor, "_run_llm",
+                               return_value="RISK: LOW") as run_llm:
+                results = monitor._run_llms_parallel(
+                    {"pid": 1, "exe_path": "/bin/x"})
+        assert run_llm.call_count == 3
+        assert all("RISK: LOW" in v for v in results.values())
+
+    def test_consensus_race_partial_done_at_one_third(self, monitor):
+        monitor._consensus_lane_done = {"claude": True, "codex": False,
+                                         "gemini": False}
+        finished = sum(1 for v in monitor._consensus_lane_done.values() if v)
+        assert finished == 1
+        # Simulate the bar update logic
+        monitor._consensus_risk_bar = int(finished / 3.0 * 100)
+        assert 30 <= monitor._consensus_risk_bar <= 35  # 33%
+
+    def test_build_consensus_race_lines(self, monitor):
+        with monitor._consensus_lane_lock:
+            monitor._consensus_lanes["claude"] = ["RISK: HIGH",
+                                                     "details about claude"]
+            monitor._consensus_lanes["codex"] = ["RISK: MEDIUM",
+                                                    "details about codex"]
+            monitor._consensus_lanes["gemini"] = ["analysis pending"]
+            monitor._consensus_lane_done = {"claude": True, "codex": True,
+                                              "gemini": False}
+        monitor._consensus_risk_bar = 66
+        out = monitor._build_consensus_race_lines(width=120)
+        joined = "\n".join(out)
+        assert "claude" in joined
+        assert "codex" in joined
+        assert "gemini" in joined
+        assert "CONSENSUS_RISK" in joined
+        # Divergence (HIGH vs MEDIUM) should be flagged
+        assert "DIVERGENCE" in joined
+
+    def test_consensus_no_divergence_when_lanes_agree(self, monitor):
+        with monitor._consensus_lane_lock:
+            monitor._consensus_lanes["claude"] = ["RISK: HIGH"]
+            monitor._consensus_lanes["codex"] = ["RISK: HIGH"]
+            monitor._consensus_lanes["gemini"] = ["RISK: HIGH"]
+        diverge, levels = monitor._consensus_lane_divergence()
+        assert diverge is False
+        assert levels == {"HIGH"}
+
+    def test_streaming_collects_lines(self, monitor):
+        # Mock subprocess.Popen so _run_llm_streaming sees a fake stdout
+        from io import BytesIO
+        fake_proc = MagicMock()
+        fake_proc.stdout = BytesIO(b"line one\nline two\n")
+        fake_proc.stderr = BytesIO(b"")
+        fake_proc.stdin = BytesIO()
+        fake_proc.returncode = 0
+        fake_proc.wait.return_value = 0
+        chunks = []
+
+        def fake_popen(*args, **kwargs):
+            return fake_proc
+
+        with patch("subprocess.Popen", side_effect=fake_popen):
+            text = monitor._run_llm_streaming(
+                "claude", "prompt", "input",
+                lambda tool, line: chunks.append((tool, line)))
+        assert "line one" in text
+        assert "line two" in text
+        # Two lines should have been chunked
+        assert len(chunks) >= 2
+
+    def test_streaming_handles_missing_binary(self, monitor):
+        with patch("subprocess.Popen", side_effect=FileNotFoundError):
+            chunks = []
+            text = monitor._run_llm_streaming(
+                "claude", "prompt", "input",
+                lambda tool, line: chunks.append(line))
+        # Returns the error tag and chunks it
+        assert "not found" in text
+        assert any("not found" in c for c in chunks)

@@ -510,6 +510,7 @@ class TestInspectWorkerFn:
         }
         with patch.object(monitor, "_collect_inspect_artifacts", return_value=artifacts), \
              patch.object(monitor, "_run_llms_parallel", return_value=analyses), \
+             patch.object(monitor, "_run_llms_parallel_streaming", return_value=analyses), \
              patch.object(monitor, "_synthesize_analyses",
                           return_value=("claude", "CONSENSUS_RISK: LOW\nAGREEMENT: unanimous")):
             monitor._inspect_worker_fn(100, "/usr/bin/test")

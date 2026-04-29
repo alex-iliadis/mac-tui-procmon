@@ -227,5 +227,13 @@ def monitor():
     mon._oscilloscope_mode = False
     mon._oscilloscope_pid = None
     mon._oscilloscope_scroll = 0
+    # Feature 4: Three-Model Consensus Race
+    import threading as _t_consensus
+    mon._consensus_lanes = {"claude": [], "codex": [], "gemini": []}
+    mon._consensus_lane_lock = _t_consensus.Lock()
+    mon._consensus_lane_done = {"claude": False, "codex": False, "gemini": False}
+    mon._consensus_risk_bar = 0
+    mon._consensus_running = False
+    mon._consensus_lane_max_lines = 60
     mon._test_select_pid = 0
     return mon

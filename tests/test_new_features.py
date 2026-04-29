@@ -190,6 +190,8 @@ class TestInspectSummaryTrigger:
                           return_value=["report"]), \
              patch.object(monitor, "_run_llms_parallel",
                           return_value=analyses), \
+             patch.object(monitor, "_run_llms_parallel_streaming",
+                          return_value=analyses), \
              patch.object(monitor, "_synthesize_analyses",
                           return_value=("claude",
                                         "CONSENSUS_RISK: CRITICAL\nBad.")), \
