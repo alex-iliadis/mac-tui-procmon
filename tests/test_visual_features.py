@@ -608,3 +608,88 @@ class TestNetworkOrbit:
         # No 2-letter country code in our layout — only org names.
         assert "[US]" not in joined
         assert "California" not in joined
+
+
+# ── 7. Process Galaxy ─────────────────────────────────────────────────
+
+
+class TestProcessGalaxy:
+    def _make_rows(self, n):
+        rows = []
+        for i in range(n):
+            rows.append({
+                "pid": i + 1,
+                "ppid": (i // 4) + 1,  # rough tree shape
+                "cpu": float(i % 10),
+                "agg_cpu": float(i % 10),
+                "rss_kb": 0,
+                "agg_rss_kb": 0,
+                "command": f"proc{i}",
+            })
+        return rows
+
+    def test_node_cap_respected(self, monitor):
+        monitor.rows = self._make_rows(200)
+        monitor._galaxy_node_cap = 80
+        nodes = monitor._galaxy_select_nodes()
+        assert len(nodes) == 80
+
+    def test_galaxy_step_initializes_positions(self, monitor):
+        monitor.rows = self._make_rows(10)
+        monitor._galaxy_step(60, 20)
+        assert len(monitor._galaxy_positions) == 10
+        # All positions are finite numbers within bounds
+        for x, y in monitor._galaxy_positions.values():
+            assert isinstance(x, float)
+            assert isinstance(y, float)
+            assert 0.0 <= x <= 60.0
+            assert 0.0 <= y <= 20.0
+
+    def test_galaxy_step_no_nan(self, monitor):
+        import math
+        monitor.rows = self._make_rows(20)
+        for _ in range(5):
+            monitor._galaxy_step(80, 24)
+        for x, y in monitor._galaxy_positions.values():
+            assert not math.isnan(x)
+            assert not math.isnan(y)
+
+    def test_new_pid_glow_set(self, monitor):
+        monitor.rows = self._make_rows(3)
+        monitor._galaxy_step(60, 20)
+        assert all(monitor._galaxy_glow.get(r["pid"]) is not None
+                    for r in monitor.rows)
+
+    def test_glow_decays(self, monitor):
+        monitor.rows = self._make_rows(3)
+        monitor._galaxy_step(60, 20)
+        first = dict(monitor._galaxy_glow)
+        monitor._galaxy_step(60, 20)
+        # Glow values must not increase between ticks for the same pid set
+        for pid, start_val in first.items():
+            assert monitor._galaxy_glow.get(pid, 0) <= start_val
+
+    def test_dropped_pid_removed_from_state(self, monitor):
+        monitor.rows = self._make_rows(5)
+        monitor._galaxy_step(60, 20)
+        # Drop pid 3
+        monitor.rows = [r for r in monitor.rows if r["pid"] != 3]
+        monitor._galaxy_step(60, 20)
+        assert 3 not in monitor._galaxy_positions
+
+    def test_toggle_resets_state(self, monitor):
+        monitor.rows = self._make_rows(5)
+        monitor._galaxy_step(60, 20)
+        assert monitor._galaxy_positions
+        monitor._toggle_galaxy_mode()  # turn ON (was off)
+        # Toggle off resets
+        monitor._toggle_galaxy_mode()
+        assert monitor._galaxy_mode is False
+
+    def test_build_galaxy_lines_returns_grid(self, monitor):
+        monitor.rows = self._make_rows(5)
+        lines = monitor._build_galaxy_lines(80, 24)
+        # Bound height is h - 6 = 18
+        assert len(lines) == 18
+        # All same width
+        assert len({len(l) for l in lines}) == 1

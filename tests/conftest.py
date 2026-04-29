@@ -247,5 +247,13 @@ def monitor():
     # Feature 6: Network Orbit / Constellation
     mon._orbit_mode = False
     mon._orbit_tick = 0
+    # Feature 7: Process Galaxy
+    mon._galaxy_mode = False
+    mon._galaxy_positions = {}
+    mon._galaxy_velocity = {}
+    mon._galaxy_glow = {}
+    mon._galaxy_known_pids = set()
+    mon._galaxy_node_cap = 80
+    mon._galaxy_iter_step = 0.5
     mon._test_select_pid = 0
     return mon

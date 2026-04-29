@@ -3374,6 +3374,16 @@ class ProcMonUI:
         # particles travel along edges to imply throughput.
         self._orbit_mode = False
         self._orbit_tick = 0  # increments each render so particles move
+        # ── Feature 7: Process Galaxy ───────────────────────────────
+        # Force-directed graph of the entire process tree. We cap node
+        # count to keep the terminal readable.
+        self._galaxy_mode = False
+        self._galaxy_positions = {}   # pid -> (x: float, y: float)
+        self._galaxy_velocity = {}    # pid -> (vx: float, vy: float)
+        self._galaxy_glow = {}        # pid -> frames_remaining for fork glow
+        self._galaxy_known_pids = set()
+        self._galaxy_node_cap = 80
+        self._galaxy_iter_step = 0.5  # spring step length
         # Test-only TUI report capture. This is intentionally opt-in so the
         # normal user-facing UI stays unchanged. The harness uses it to export
         # the exact detail-pane buffer for post-run assertions.
@@ -4370,7 +4380,13 @@ class ProcMonUI:
             return
 
         # ── Compute detail box content and height ──
-        if self._oscilloscope_mode and self._oscilloscope_pid is not None:
+        if self._galaxy_mode:
+            detail_all_lines = self._build_galaxy_lines(w, h)
+            detail_title = (f"Process Galaxy — {len(self._galaxy_positions)} "
+                             f"nodes")
+            max_detail_h = max(10, (h - y) * 4 // 5)
+            detail_h = min(len(detail_all_lines) + 2, max_detail_h)
+        elif self._oscilloscope_mode and self._oscilloscope_pid is not None:
             detail_all_lines = self._build_oscilloscope_lines(
                 self._oscilloscope_pid, w)
             sel_cmd = ""
@@ -5088,12 +5104,12 @@ class ProcMonUI:
                 ("T", "Triage"),
                 ("U", "PIDlog"),
                 ("o", "Oscope"),
+                ("G", "Galaxy"),
                 ("r", "Replay"),
                 ("?", "Ask"),
                 ("\\", "Narrator"),
                 ("L", "Log"),
                 ("f", "Filter"),
-                ("C", "Config"),
                 ("PgU/D", "Page"),
                 ("k", "Kill"),
                 ("q", "Quit"),
@@ -5379,6 +5395,8 @@ class ProcMonUI:
             self._toggle_unified_log_mode()
         elif key == ord("o"):
             self._toggle_oscilloscope_mode()
+        elif key == ord("G"):
+            self._toggle_galaxy_mode()
         elif key == ord("r"):
             # Feature 5: enter Attack Chain Replay if a buffer was captured.
             if self._replay_mode:
@@ -5393,7 +5411,8 @@ class ProcMonUI:
                     or self._audit_mode or self._traffic_mode
                     or self._unified_log_mode
                     or self._oscilloscope_mode
-                    or self._replay_mode):
+                    or self._replay_mode
+                    or self._galaxy_mode):
                 self._detail_focus = True
         elif key == ord("C"):  # Shift+C — alert config
             self._prompt_config()
@@ -5402,7 +5421,10 @@ class ProcMonUI:
         elif key == ord("k"):
             self._kill_selected()
         elif key == 27:  # Escape
-            if self._replay_mode:
+            if self._galaxy_mode:
+                self._galaxy_mode = False
+                self._detail_focus = False
+            elif self._replay_mode:
                 self._exit_replay_mode()
             elif self._oscilloscope_mode:
                 self._oscilloscope_mode = False
@@ -5719,6 +5741,181 @@ class ProcMonUI:
             steps += 1
             if steps > 4 * (w + h):  # safety guard
                 break
+
+    # ── Feature 7: Process Galaxy ──────────────────────────────────────
+
+    def _toggle_galaxy_mode(self):
+        """Toggle the force-directed process galaxy view."""
+        if self._galaxy_mode:
+            self._galaxy_mode = False
+            self._detail_focus = False
+            return
+        self._galaxy_mode = True
+        # Close mutually-exclusive modes
+        self._inspect_mode = False
+        self._net_mode = False
+        self._audit_mode = False
+        self._oscilloscope_mode = False
+        if getattr(self, "_events_mode", False):
+            self._stop_events_stream()
+            self._events_mode = False
+        self._detail_focus = True
+        # Reset positions so a fresh layout settles in.
+        self._galaxy_positions = {}
+        self._galaxy_velocity = {}
+        self._galaxy_glow = {}
+        self._galaxy_known_pids = set()
+
+    def _galaxy_select_nodes(self):
+        """Pick up to `_galaxy_node_cap` PIDs ranked by aggregate CPU."""
+        rows = sorted(
+            self.rows,
+            key=lambda r: r.get("agg_cpu", r.get("cpu", 0)) or 0,
+            reverse=True,
+        )
+        return rows[: self._galaxy_node_cap]
+
+    def _galaxy_step(self, w, h):
+        """Run one Fruchterman-Reingold-ish iteration of the spring solver.
+
+        Updates `_galaxy_positions` and `_galaxy_velocity` in place. Marks
+        newly-spotted PIDs with a glow countdown.
+        """
+        import math
+        import random
+        nodes = self._galaxy_select_nodes()
+        node_pids = [r["pid"] for r in nodes]
+        node_set = set(node_pids)
+        # Track new PIDs for glow effect
+        for pid in node_pids:
+            if pid not in self._galaxy_known_pids:
+                self._galaxy_glow[pid] = 6
+        # Decrement glow
+        for pid in list(self._galaxy_glow.keys()):
+            if pid not in node_set:
+                self._galaxy_glow.pop(pid, None)
+                continue
+            if self._galaxy_glow[pid] > 0:
+                self._galaxy_glow[pid] -= 1
+            else:
+                self._galaxy_glow.pop(pid, None)
+        self._galaxy_known_pids = node_set
+        # Drop positions for nodes no longer present.
+        for pid in list(self._galaxy_positions.keys()):
+            if pid not in node_set:
+                self._galaxy_positions.pop(pid, None)
+                self._galaxy_velocity.pop(pid, None)
+        # Initialize positions for new nodes.
+        bound_w = max(10, w - 4)
+        bound_h = max(6, h - 6)
+        for pid in node_pids:
+            if pid not in self._galaxy_positions:
+                self._galaxy_positions[pid] = (
+                    random.uniform(2.0, bound_w - 2),
+                    random.uniform(2.0, bound_h - 2),
+                )
+                self._galaxy_velocity[pid] = (0.0, 0.0)
+        if not node_pids:
+            return
+        # Spring constants
+        area = bound_w * bound_h
+        k = math.sqrt(area / max(1, len(node_pids)))
+        # Repulsive forces between every pair.
+        forces = {pid: [0.0, 0.0] for pid in node_pids}
+        for i, p in enumerate(node_pids):
+            px, py = self._galaxy_positions[p]
+            for j in range(i + 1, len(node_pids)):
+                q = node_pids[j]
+                qx, qy = self._galaxy_positions[q]
+                dx = px - qx
+                dy = py - qy
+                d2 = dx * dx + dy * dy + 0.01
+                d = math.sqrt(d2)
+                rep = (k * k) / d
+                fx = (dx / d) * rep
+                fy = (dy / d) * rep
+                forces[p][0] += fx
+                forces[p][1] += fy
+                forces[q][0] -= fx
+                forces[q][1] -= fy
+        # Attractive forces along edges (parent → child).
+        for r in nodes:
+            ppid = r.get("ppid", 0)
+            pid = r["pid"]
+            if ppid in node_set and ppid != pid:
+                p1x, p1y = self._galaxy_positions[ppid]
+                p2x, p2y = self._galaxy_positions[pid]
+                dx = p2x - p1x
+                dy = p2y - p1y
+                d = math.sqrt(dx * dx + dy * dy + 0.01)
+                attr = (d * d) / k
+                fx = (dx / d) * attr
+                fy = (dy / d) * attr
+                forces[pid][0] -= fx
+                forces[pid][1] -= fy
+                forces[ppid][0] += fx
+                forces[ppid][1] += fy
+        # Apply forces with damping; clamp to bounds.
+        damp = 0.85
+        for pid in node_pids:
+            fx, fy = forces[pid]
+            vx, vy = self._galaxy_velocity[pid]
+            vx = (vx + fx * 0.01) * damp
+            vy = (vy + fy * 0.01) * damp
+            # Limit displacement per step.
+            mag = math.sqrt(vx * vx + vy * vy)
+            limit = 1.5
+            if mag > limit:
+                vx = vx / mag * limit
+                vy = vy / mag * limit
+            x, y = self._galaxy_positions[pid]
+            x = max(1.0, min(bound_w - 1, x + vx))
+            y = max(1.0, min(bound_h - 1, y + vy))
+            self._galaxy_positions[pid] = (x, y)
+            self._galaxy_velocity[pid] = (vx, vy)
+
+    def _build_galaxy_lines(self, w, h):
+        """Render the galaxy graph as text lines."""
+        if w < 30 or h < 10:
+            return [" Galaxy view needs a larger window"]
+        # Run one solver step per render to animate.
+        self._galaxy_step(w, h)
+        nodes = self._galaxy_select_nodes()
+        node_set = {r["pid"] for r in nodes}
+        bound_w = max(10, w - 4)
+        bound_h = max(6, h - 6)
+        grid = [[" "] * bound_w for _ in range(bound_h)]
+        # Edges first (so nodes paint over them)
+        for r in nodes:
+            ppid = r.get("ppid", 0)
+            pid = r["pid"]
+            if ppid not in node_set or ppid == pid:
+                continue
+            x1, y1 = self._galaxy_positions[ppid]
+            x2, y2 = self._galaxy_positions[pid]
+            self._orbit_draw_line(
+                grid, (int(x1), int(y1)), (int(x2), int(y2)))
+        # Node glyphs
+        for r in nodes:
+            pid = r["pid"]
+            x, y = self._galaxy_positions[pid]
+            ix, iy = int(x), int(y)
+            if not (0 <= iy < bound_h and 0 <= ix < bound_w):
+                continue
+            cmd = (r.get("command") or "?")
+            ch = cmd[0] if cmd else "?"
+            # Glow → use a brighter glyph
+            if self._galaxy_glow.get(pid):
+                ch = "★"
+            else:
+                # Size by CPU%. Show as letter for cpu>0, dot otherwise.
+                cpu = r.get("agg_cpu", r.get("cpu", 0)) or 0
+                if cpu > 20:
+                    ch = ch.upper()
+                elif cpu < 0.5:
+                    ch = "·"
+            grid[iy][ix] = ch
+        return ["".join(row) for row in grid]
 
     def _toggle_net_mode(self):
         """Toggle network connection view in the detail box."""
