@@ -9,7 +9,7 @@
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](LICENSE)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![macOS 13+](https://img.shields.io/badge/macOS-13%2B-lightgrey)
-![Tests 1010 passing](https://img.shields.io/badge/tests-1010%20passing-brightgreen)
+![Tests 1083 passing](https://img.shields.io/badge/tests-1083%20passing-brightgreen)
 ![Coverage 75%](https://img.shields.io/badge/coverage-75%25-brightgreen)
 ![AI Claude · Codex · Gemini](https://img.shields.io/badge/AI-Claude%20%C2%B7%20Codex%20%C2%B7%20Gemini-8a2be2)
 
@@ -32,6 +32,14 @@
 - **💾 Disk I/O bytes per PID.** Cumulative read / written bytes from `proc_pid_rusage(RUSAGE_INFO_V4)` plus a derived B/s rate, all without forking.
 - **📊 Sparkline trends.** The Inspect panel's `── TREND ──` section renders 60-sample Unicode-block sparklines for CPU%, RSS, ↓ Net, ↑ Net.
 - **🪪 Mach IPC handle count.** Inspect surfaces `IPC: N Mach file ports` via `proc_pidinfo(PROC_PIDLISTFILEPORTS)` — a useful XPC / IPC pressure signal that does not require root.
+- **💥 Process Event Ripples.** Rows pulse salmon on a CPU spike, light-green on a sudden network or disk-I/O burst, decaying over four refresh frames. The whole list reacts to activity rather than just sitting still.
+- **🎙 AI Narrator.** Press `\` and the TUI cycles through the most-anomalous process every 15 s, frames its row with a `▶` marker, and renders a one-line LLM caption ("PID 4242 just spiked to 87% CPU, child of `/usr/bin/sh` invoked from a launch agent"). Optional macOS `say` voiceover means a screencast comes with its own narration track.
+- **📈 Resource Oscilloscope.** Press `o` and the detail pane becomes a stack of nine synchronized Braille waveforms — CPU, RSS, ↓Net, ↑Net, disk read, disk write, GPU%, FD count, Mach ports — for the selected PID, each tagged with its rolling peak.
+- **🏎 Three-Model Consensus Race.** While Inspect runs its analyses, claude / codex / gemini stream into three side-by-side lanes with live spinners and a `CONSENSUS_RISK` bar that fills 33% per finished lane; a divergence flasher fires when the lanes disagree on risk level.
+- **▶ Attack Chain Replay.** Captured event buffers persist on close; press `r` to enter a scrubbable replay with `←` / `→` / `space`, an event-density timeline at the bottom, and a heuristic linker that flags `curl → bash -c` patterns as potential drive-bys.
+- **🪐 Network Orbit.** From any network panel, press `g` for an animated constellation: the selected PID at the center, each remote endpoint orbiting on a circle, edges colored by service (HTTPS blue, HTTP yellow, SSH cyan, UDP magenta), animated `●` particles travelling along each edge to imply throughput.
+- **🌌 Process Galaxy.** Press `G` for a force-directed graph of the entire process tree, with parent → child edges, node glyphs sized by CPU%, and a glow on freshly-forked PIDs. Spring solver runs one iteration per refresh so the layout settles in front of you.
+- **📼 Process Lifecycle DVR.** Press `D` for a Gantt-style horizontal timeline: every PID seen in the last 300 ticks gets one row with green blocks where it was alive, time on the X axis, `←` / `→` to scrub a frozen cursor, `space` to jump back to the live tail.
 
 > [!NOTE]
 > **Process-monitoring only.** Host-wide security posture — TCC, kernel/boot, persistence, browser extensions, CVE intelligence, full security scoring, remediation workflows, headless audit reports — lives in the sister project [`mac-system-security`](https://github.com/alex-iliadis/mac-system-security).
@@ -424,6 +432,11 @@ youruser ALL=(root) NOPASSWD: /usr/local/sbin/mac-tui-procmon-sudo *
 | `I`             | Toggle Inspect mode                                   |
 | `T`             | Toggle Deep Process Triage                            |
 | `U`             | Toggle Unified Log stream for selected process        |
+| `o`             | Toggle Resource Oscilloscope (Braille waveform stack) |
+| `G`             | Toggle Process Galaxy (force-directed graph)          |
+| `D`             | Toggle Process Lifecycle DVR (Gantt timeline)         |
+| `r`             | Toggle Attack Chain Replay (scrubbable event buffer)  |
+| `\`             | Toggle AI Narrator (auto-spotlight + voiceover)       |
 | `Shift+C`       | Alert config dialog                                   |
 | `k`             | Kill selected process (`SIGTERM`)                     |
 | `L`             | Toggle debug log overlay                              |
@@ -444,12 +457,15 @@ youruser ALL=(root) NOPASSWD: /usr/local/sbin/mac-tui-procmon-sudo *
 
 Mode-specific extras:
 
-- **Inspect** — `I` toggles off.
+- **Inspect** — `I` toggles off. While the LLMs are streaming, claude / codex / gemini fill three side-by-side lanes with a `CONSENSUS_RISK` bar and a divergence flasher.
 - **Audit / Triage** — `R`/`r` re-run, structured cursor over findings.
-- **Events** — `c` clears; first Esc stops + LLM summary, second Esc closes.
+- **Events** — `c` clears; first Esc stops + LLM summary, second Esc closes. Captured events persist into the Replay buffer for `r`.
 - **Traffic** — `c` clears flows; Esc/q stop the mitmdump shim.
-- **Network** — `k` SIGKILLs the connection's owning process (with confirmation); `N` closes.
+- **Network** — `k` SIGKILLs the connection's owning process (with confirmation); `g` toggles the orbit constellation; `N` closes.
 - **Unified Log** — `c` clears the ring buffer; `Esc`/`q` stop the `log stream` subprocess and close.
+- **Oscilloscope** — `Esc` closes; the waveforms refresh on every tick from the per-PID metric ring buffer.
+- **Galaxy / DVR** — `←`/`→`/`space` scrub or play (Galaxy auto-iterates; DVR freezes the cursor when you scrub and resumes the live tail on `space`).
+- **Replay** — `←`/`→` step, `space` toggles play. Drive-by-pattern hits are flagged with a ⚠ banner.
 
 ### Chat overlay (`?`)
 
