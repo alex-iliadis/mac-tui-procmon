@@ -543,3 +543,118 @@ class TestDiskIoDisplay:
         monitor.selected = 0
         label, text = monitor._collect_chat_context()
         assert "disk_io_rate" in text or "disk_io_total" in text
+
+
+# ── 6. Per-PID metric ring buffer + sparklines ───────────────────────────
+
+
+class TestSparklineHelper:
+    def test_empty_returns_empty_string(self):
+        assert procmon._sparkline([]) == ""
+        assert procmon._sparkline([], width=10) == ""
+
+    def test_all_zeros_uses_lowest_block(self):
+        s = procmon._sparkline([0, 0, 0, 0])
+        assert s == procmon._SPARK_BLOCKS[0] * 4
+
+    def test_single_value(self):
+        s = procmon._sparkline([7.5])
+        # max==value → top block
+        assert s == procmon._SPARK_BLOCKS[-1]
+
+    def test_normalizes_to_peak(self):
+        s = procmon._sparkline([0, 50, 100])
+        assert len(s) == 3
+        assert s[0] == procmon._SPARK_BLOCKS[0]
+        assert s[2] == procmon._SPARK_BLOCKS[-1]
+
+    def test_truncates_to_width(self):
+        s = procmon._sparkline(list(range(100)), width=24)
+        assert len(s) == 24
+        # most-recent samples kept (last value should be top block)
+        assert s[-1] == procmon._SPARK_BLOCKS[-1]
+
+    def test_handles_large_values(self):
+        s = procmon._sparkline([1e9, 2e9, 4e9])
+        assert len(s) == 3
+        assert s[-1] == procmon._SPARK_BLOCKS[-1]
+
+    def test_negative_values_clamped(self):
+        s = procmon._sparkline([-5, 10, 20])
+        # Negative coerced to 0 → first block at 0/20=0
+        assert s[0] == procmon._SPARK_BLOCKS[0]
+
+
+class TestMetricHistoryCollect:
+    def test_history_populates_after_collect(self, monitor):
+        proc_a = {"pid": 100, "ppid": 1, "cpu": 5.0, "rss_kb": 1024,
+                  "threads": 1, "command": "/bin/x", "cpu_ticks": 0}
+        with patch("procmon.get_all_processes", return_value=[proc_a]), \
+             patch("procmon.get_net_snapshot", return_value={}), \
+             patch("procmon.get_fd_counts", return_value={}), \
+             patch("procmon.get_cwds", return_value={}), \
+             patch("procmon._get_disk_io", return_value=(0, 0)):
+            monitor.collect_data()
+            monitor.collect_data()
+            monitor.collect_data()
+        hist = monitor._metric_history.get(100, {})
+        assert "cpu" in hist
+        assert len(hist["cpu"]) == 3
+        # Last sample retained the live value
+        assert hist["cpu"][-1] == 5.0
+
+    def test_history_evicts_dead_pids(self, monitor):
+        # Pre-seed history for a PID we'll never see again, then advance time
+        # past _metric_history_max_age and run collect_data once.
+        monitor._metric_history[999] = {
+            "cpu": __import__("collections").deque([1.0]),
+        }
+        monitor._metric_history_seen[999] = 0.0
+        monitor._metric_history_max_age = 1
+        proc_b = {"pid": 200, "ppid": 1, "cpu": 1.0, "rss_kb": 1024,
+                  "threads": 1, "command": "/bin/y", "cpu_ticks": 0}
+        # time.monotonic returns ~now (large) so 999 is way past max_age
+        with patch("procmon.get_all_processes", return_value=[proc_b]), \
+             patch("procmon.get_net_snapshot", return_value={}), \
+             patch("procmon.get_fd_counts", return_value={}), \
+             patch("procmon.get_cwds", return_value={}), \
+             patch("procmon._get_disk_io", return_value=(0, 0)):
+            monitor.collect_data()
+        assert 999 not in monitor._metric_history
+        assert 200 in monitor._metric_history
+
+
+class TestTrendSection:
+    def test_empty_when_no_history(self, monitor):
+        assert monitor._build_trend_section(123) == []
+        assert monitor._build_trend_section(None) == []
+
+    def test_renders_section_when_history_present(self, monitor):
+        import collections as _c
+        monitor._metric_history[100] = {
+            "cpu": _c.deque([1.0, 2.0, 3.0]),
+            "rss_kb": _c.deque([100.0, 200.0, 300.0]),
+            "net_in": _c.deque([0.0, 0.0, 0.0]),
+            "net_out": _c.deque([0.0, 0.0, 0.0]),
+        }
+        lines = monitor._build_trend_section(100)
+        joined = "\n".join(lines)
+        assert "TREND" in joined
+        assert "CPU%" in joined
+        assert "MEM" in joined
+        assert "peak" in joined
+
+    def test_inspect_report_includes_trend(self, monitor):
+        import collections as _c
+        monitor._metric_history[42] = {
+            "cpu": _c.deque([1.0, 2.0]),
+            "rss_kb": _c.deque([100.0, 200.0]),
+            "net_in": _c.deque([0.0, 0.0]),
+            "net_out": _c.deque([0.0, 0.0]),
+        }
+        artifacts = {"pid": 42, "exe_path": "/bin/x",
+                     "yara_memory": {"success": False, "error": "skipped"},
+                     "yara_file": []}
+        lines = monitor._format_inspect_report(artifacts)
+        joined = "\n".join(lines)
+        assert "TREND" in joined

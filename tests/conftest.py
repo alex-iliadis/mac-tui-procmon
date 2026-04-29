@@ -48,6 +48,13 @@ def monitor():
     mon.net_rates = {}
     mon._prev_disk_io = {}
     mon._disk_io_rates = {}
+    # Per-PID metric ring buffer (sparklines)
+    import threading as _th_metric
+    mon._metric_history = {}
+    mon._metric_history_lock = _th_metric.Lock()
+    mon._metric_history_max_age = 300
+    mon._metric_history_seen = {}
+    mon._metric_history_max = 60
     mon.sort_mode = procmon.SORT_MEM
     mon._sort_inverted = False
     mon._dynamic_sort = False

@@ -9,6 +9,7 @@ priority that continues monitoring even when the system cannot fork.
 """
 
 import argparse
+import collections
 import ctypes
 import ctypes.util
 import curses
@@ -2323,6 +2324,41 @@ def fmt_rate(bps):
         return f"{bps / 1048576:.1f} MB/s"
 
 
+_SPARK_BLOCKS = "▁▂▃▄▅▆▇█"
+
+
+def _sparkline(values, width=24):
+    """Render an iterable of numeric samples as Unicode-block bars.
+
+    Returns a string of length ≤ `width`. Empty input returns an empty
+    string. Values are normalized over [0, max(values)]; an all-zero or
+    all-equal series renders as the lowest block to make 'something
+    here' visible without misleading magnitude.
+    """
+    try:
+        nums = [float(v) for v in values if v is not None]
+    except (TypeError, ValueError):
+        return ""
+    if not nums:
+        return ""
+    if width <= 0:
+        return ""
+    # Truncate to the right-most `width` samples (most recent).
+    if len(nums) > width:
+        nums = nums[-width:]
+    peak = max(nums)
+    if peak <= 0:
+        return _SPARK_BLOCKS[0] * len(nums)
+    out = []
+    for v in nums:
+        if v < 0:
+            v = 0.0
+        idx = int((v / peak) * (len(_SPARK_BLOCKS) - 1))
+        idx = max(0, min(len(_SPARK_BLOCKS) - 1, idx))
+        out.append(_SPARK_BLOCKS[idx])
+    return "".join(out)
+
+
 import socket as _socket
 import concurrent.futures as _futures
 
@@ -2989,6 +3025,16 @@ class ProcMonUI:
         # prior snapshot, just like net rates.
         self._prev_disk_io = {}    # pid -> (bytes_read, bytes_written)
         self._disk_io_rates = {}   # pid -> (B/s read, B/s written)
+        # Per-PID metric history for sparklines. Each pid maps to a dict
+        # of {metric_name: deque(maxlen=60)}. Populated each refresh in
+        # collect_data; pids that haven't been seen for
+        # _metric_history_max_age seconds are evicted so dead-process
+        # rings don't accumulate forever.
+        self._metric_history = {}
+        self._metric_history_lock = threading.Lock()
+        self._metric_history_max_age = 300  # seconds
+        self._metric_history_seen = {}   # pid -> last-seen monotonic time
+        self._metric_history_max = 60    # samples per metric per pid
         self.sort_mode = SORT_MEM
         self._sort_inverted = False
         self._dynamic_sort = False  # threshold-exceeding processes bubble to top
@@ -3633,6 +3679,36 @@ class ProcMonUI:
                 p["disk_out"] = -1
         self._prev_disk_io = new_disk_snap
         self._disk_io_rates = new_disk_rates
+
+        # Per-PID metric ring buffer (drives the Inspect TREND panel).
+        # Snapshot CPU%, RSS_KB, net_in (B/s), net_out (B/s) for every
+        # currently visible PID, then evict any PID that hasn't been seen
+        # for _metric_history_max_age seconds so the dict can't grow
+        # without bound. Done under a lock because the inspect render
+        # path (potentially on the run thread) may iterate the same dict.
+        seen_now = time.monotonic()
+        with self._metric_history_lock:
+            for p in all_procs:
+                pid = p["pid"]
+                hist = self._metric_history.setdefault(pid, {})
+                for k in ("cpu", "rss_kb", "net_in", "net_out"):
+                    dq = hist.get(k)
+                    if dq is None:
+                        dq = collections.deque(
+                            maxlen=self._metric_history_max)
+                        hist[k] = dq
+                    val = p.get(k, 0)
+                    # Net rates can be -1 ("no sample yet"); coerce to 0.
+                    if k in ("net_in", "net_out") and val < 0:
+                        val = 0
+                    dq.append(float(max(0.0, val)))
+                self._metric_history_seen[pid] = seen_now
+            # Eviction pass — drop pids not seen recently.
+            stale = [pid for pid, last in self._metric_history_seen.items()
+                     if seen_now - last > self._metric_history_max_age]
+            for pid in stale:
+                self._metric_history.pop(pid, None)
+                self._metric_history_seen.pop(pid, None)
 
         matched = [p for p in all_procs
                    if p["pid"] not in _PHANTOM_TREE_PARENTS
@@ -6559,6 +6635,49 @@ class ProcMonUI:
         artifacts["pid"] = pid
         return artifacts
 
+    def _build_trend_section(self, pid):
+        """Render per-PID metric trend (CPU%, RSS, net I/O) as sparklines.
+
+        Returns a list of strings to splice into the inspect/detail panel,
+        or an empty list when no history exists for the pid.
+        """
+        if pid is None:
+            return []
+        with self._metric_history_lock:
+            hist = self._metric_history.get(pid)
+            if not hist:
+                return []
+            cpu_vals = list(hist.get("cpu", []))
+            rss_vals = list(hist.get("rss_kb", []))
+            ni_vals = list(hist.get("net_in", []))
+            no_vals = list(hist.get("net_out", []))
+
+        sample_count = max(len(cpu_vals), len(rss_vals),
+                           len(ni_vals), len(no_vals))
+        if sample_count == 0:
+            return []
+
+        lines = []
+        lines.append(f"\u2500\u2500 TREND (last {sample_count} samples) \u2500\u2500")
+        if cpu_vals:
+            peak = max(cpu_vals)
+            spark = _sparkline(cpu_vals, width=24)
+            lines.append(f"  CPU%:    {spark}  peak {peak:.1f}%")
+        if rss_vals:
+            peak_kb = max(rss_vals)
+            spark = _sparkline(rss_vals, width=24)
+            lines.append(f"  MEM:     {spark}  peak {fmt_mem(peak_kb)}")
+        if ni_vals:
+            peak = max(ni_vals)
+            spark = _sparkline(ni_vals, width=24)
+            lines.append(f"  Net \u2193:   {spark}  peak {fmt_rate(peak)}")
+        if no_vals:
+            peak = max(no_vals)
+            spark = _sparkline(no_vals, width=24)
+            lines.append(f"  Net \u2191:   {spark}  peak {fmt_rate(peak)}")
+        lines.append("")
+        return lines
+
     def _format_inspect_report(self, artifacts):
         """Format collected artifacts into display lines."""
         lines = []
@@ -6580,6 +6699,16 @@ class ProcMonUI:
         yf = artifacts.get("yara_file") or []
         lines.append(f"  [DISK-YARA] {len(yf)} hit{'s' if len(yf) != 1 else ''} on on-disk binary")
         lines.append("")
+
+        # Per-PID metric sparklines (rolling-window trend)
+        try:
+            trend = self._build_trend_section(
+                artifacts.get("pid") if isinstance(artifacts.get("pid"), int)
+                else None)
+            if trend:
+                lines.extend(trend)
+        except Exception:
+            pass
 
         # Code signature
         lines.append("\u2500\u2500 Code Signature \u2500\u2500")
