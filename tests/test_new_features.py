@@ -922,3 +922,91 @@ class TestGpuChatContext:
         label, text = monitor._collect_chat_context()
         # No 'gpu:' line should be present
         assert "  gpu:" not in text
+
+
+# ── 9. Mach file-port count (IPC enumeration) ────────────────────────────
+
+
+class TestMachPortCount:
+    def test_count_from_proc_pidinfo_byte_total(self):
+        # proc_pidinfo returns total bytes that *would* be written —
+        # 8 bytes per proc_fileportinfo struct.
+        with patch.object(procmon._libproc, "proc_pidinfo",
+                          return_value=24):
+            assert procmon._get_mach_port_count(123) == 3
+
+    def test_zero_count(self):
+        with patch.object(procmon._libproc, "proc_pidinfo",
+                          return_value=0):
+            assert procmon._get_mach_port_count(123) == 0
+
+    def test_negative_return_means_failure(self):
+        with patch.object(procmon._libproc, "proc_pidinfo",
+                          return_value=-1):
+            assert procmon._get_mach_port_count(123) == -1
+
+    def test_invalid_pid_returns_minus_one(self):
+        assert procmon._get_mach_port_count(0) == -1
+        assert procmon._get_mach_port_count(-5) == -1
+
+    def test_oserror_returns_minus_one(self):
+        with patch.object(procmon._libproc, "proc_pidinfo",
+                          side_effect=OSError("boom")):
+            assert procmon._get_mach_port_count(123) == -1
+
+
+class TestMachPortInspectIntegration:
+    def test_inspect_toggle_samples_mach_ports(self, monitor):
+        from tests.conftest import make_proc
+        monitor.rows = [make_proc(pid=42)]
+        monitor.selected = 0
+        with patch("procmon._get_mach_port_count", return_value=7), \
+             patch("procmon._get_proc_path", return_value="/bin/x"), \
+             patch.object(monitor, "_start_inspect_fetch"):
+            monitor._toggle_inspect_mode()
+        assert monitor.rows[0].get("mach_ports") == 7
+
+    def test_inspect_report_shows_mach_port_count(self, monitor):
+        artifacts = {"pid": 42, "exe_path": "/bin/x",
+                     "yara_memory": {"success": False, "error": "no"},
+                     "yara_file": [],
+                     "mach_ports": 12}
+        lines = monitor._format_inspect_report(artifacts)
+        joined = "\n".join(lines)
+        assert "IPC: 12 Mach file ports" in joined
+
+    def test_inspect_report_omits_ipc_when_unavailable(self, monitor):
+        artifacts = {"pid": 42, "exe_path": "/bin/x",
+                     "yara_memory": {"success": False, "error": "no"},
+                     "yara_file": [],
+                     "mach_ports": -1}
+        lines = monitor._format_inspect_report(artifacts)
+        joined = "\n".join(lines)
+        assert "IPC:" not in joined
+
+    def test_chat_context_includes_mach_port_count(self, monitor):
+        from tests.conftest import make_proc
+        r = make_proc(pid=100)
+        r["mach_ports"] = 5
+        monitor.rows = [r]
+        monitor.selected = 0
+        label, text = monitor._collect_chat_context()
+        assert "mach_file_ports: 5" in text
+
+    def test_chat_context_omits_mach_ports_when_minus_one(self, monitor):
+        from tests.conftest import make_proc
+        r = make_proc(pid=100)
+        r["mach_ports"] = -1
+        monitor.rows = [r]
+        monitor.selected = 0
+        label, text = monitor._collect_chat_context()
+        assert "mach_file_ports" not in text
+
+    def test_singular_label_for_one_port(self, monitor):
+        artifacts = {"pid": 1, "exe_path": "/bin/x",
+                     "yara_memory": {"success": False, "error": "no"},
+                     "yara_file": [],
+                     "mach_ports": 1}
+        lines = monitor._format_inspect_report(artifacts)
+        joined = "\n".join(lines)
+        assert "1 Mach file port " in joined  # singular

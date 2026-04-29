@@ -50,6 +50,10 @@ PROC_PIDTBSDINFO = 3
 PROC_PIDTASKINFO = 4
 PROC_PIDLISTFDS = 1
 PROC_PIDVNODEPATHINFO = 9
+# proc_pidinfo flavor for Mach file ports (count of named-port handles
+# the process holds). Returns sizeof(proc_fileportinfo) * count, which
+# we parse for length only — we don't dereference the names.
+PROC_PIDLISTFILEPORTS = 14
 PROC_PIDPATHINFO_MAXSIZE = 4096
 
 # sysctl
@@ -942,6 +946,31 @@ def _get_fd_count(pid):
     if buf_needed <= 0:
         return -1
     return buf_needed // _PROC_PIDLISTFD_SIZE
+
+
+# sizeof(struct proc_fileportinfo) — 8 bytes (two uint32_t fields).
+_PROC_FILEPORTINFO_SIZE = 8
+
+
+def _get_mach_port_count(pid):
+    """Return the number of Mach file ports the pid holds, or -1.
+
+    Uses proc_pidinfo(PROC_PIDLISTFILEPORTS) — unlike task_for_pid this
+    does NOT require root or any task entitlement, so we can read it for
+    any pid we can already see in proc_listallpids. The kernel returns
+    the total bytes that *would* be written; we divide by sizeof to
+    recover the count and never actually dereference the buffer.
+    """
+    if pid <= 0:
+        return -1
+    try:
+        ret = _libproc.proc_pidinfo(
+            pid, PROC_PIDLISTFILEPORTS, 0, None, 0)
+    except OSError:
+        return -1
+    if ret < 0:
+        return -1
+    return ret // _PROC_FILEPORTINFO_SIZE
 
 
 def _get_cwd(pid):
@@ -7038,6 +7067,14 @@ class ProcMonUI:
             artifacts["yara_memory"] = {"success": False,
                                         "error": "skipped — requires root"}
 
+        # 16. Mach file-port count (IPC handle enumeration). Doesn't need
+        # task_for_pid, so works without root for any pid we can already
+        # see; -1 means libproc rejected it (zombie / restricted).
+        try:
+            artifacts["mach_ports"] = _get_mach_port_count(pid)
+        except Exception:
+            artifacts["mach_ports"] = -1
+
         artifacts["exe_path"] = exe_path
         artifacts["pid"] = pid
         return artifacts
@@ -7116,6 +7153,16 @@ class ProcMonUI:
                 lines.extend(trend)
         except Exception:
             pass
+
+        # Mach file ports (IPC handle count). Always populated when the
+        # selected row's mach_ports field is non-negative; -1 means
+        # libproc rejected the call (process exited or restricted).
+        mp_count = artifacts.get("mach_ports")
+        if isinstance(mp_count, int) and mp_count >= 0:
+            lines.append(
+                f"── IPC: {mp_count} Mach file port"
+                f"{'s' if mp_count != 1 else ''} ──")
+            lines.append("")
 
         # Code signature
         lines.append("\u2500\u2500 Code Signature \u2500\u2500")
@@ -7660,6 +7707,14 @@ class ProcMonUI:
         self._inspect_pid = sel["pid"]
         self._inspect_cmd = sel["command"].split()[0].rsplit("/", 1)[-1][:20]
         exe_path = _get_proc_path(sel["pid"]) or sel["command"].split()[0]
+        # Lazy sample: enumerate Mach file-port count once per inspect
+        # toggle (instead of every refresh — proc_pidinfo on
+        # PROC_PIDLISTFILEPORTS is cheap but we still don't want it on
+        # every PID every tick).
+        try:
+            sel["mach_ports"] = _get_mach_port_count(sel["pid"])
+        except Exception:
+            sel["mach_ports"] = -1
         self._inspect_lines = []
         self._inspect_scroll = 0
         self._inspect_mode = True
@@ -8637,6 +8692,10 @@ class ProcMonUI:
             gpu_pct = r.get("gpu_pct")
             gpu_line = (f"\n  gpu: {gpu_pct:.1f}%"
                         if gpu_pct is not None else "")
+            mach = r.get("mach_ports")
+            mach_line = ""
+            if isinstance(mach, int) and mach >= 0:
+                mach_line = f"\n  mach_file_ports: {mach}"
             parts.append(
                 f"  command: {r['command']}\n"
                 f"  ppid: {r.get('ppid')}\n"
@@ -8644,7 +8703,7 @@ class ProcMonUI:
                 f"  memory: {r.get('rss_kb', 0)} KB\n"
                 f"  threads: {r.get('threads', 0)}\n"
                 f"  fds: {r.get('fds', '?')}"
-                f"{gpu_line}{disk_line}{disk_total}")
+                f"{gpu_line}{mach_line}{disk_line}{disk_total}")
         else:
             label = "Process list"
             parts.append("The user is looking at the main process list.")
