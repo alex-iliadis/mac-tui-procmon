@@ -2,19 +2,31 @@
 
 # mac-tui-procmon
 
-**Terminal UI process monitor for macOS — survives fork bombs and memory exhaustion via direct `libproc` / `sysctl` calls.**
+### The process monitor that answers back.
+
+**An AI-augmented terminal UI process monitor for macOS. Every screen — process tree, forensic inspect, network panel, live security timeline — is one keystroke away from a context-grounded conversation with the assistant of your choice. Built on direct `libproc` / `sysctl` calls so it stays up while the host falls apart.**
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](LICENSE)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![macOS 13+](https://img.shields.io/badge/macOS-13%2B-lightgrey)
 ![Tests 945 passing](https://img.shields.io/badge/tests-945%20passing-brightgreen)
 ![Coverage 75%](https://img.shields.io/badge/coverage-75%25-brightgreen)
+![AI Claude · Codex · Gemini](https://img.shields.io/badge/AI-Claude%20%C2%B7%20Codex%20%C2%B7%20Gemini-8a2be2)
 
 </div>
 
 <p align="center">
   <img src="screenshots/general-view.png" alt="mac-tui-procmon main view">
 </p>
+
+## Why it's different
+
+- **🧠 Ask the screen.** Press `?` from anywhere — process list, inspect view, network panel, security timeline — and an LLM answers *"what is this thing? is it suspicious? what's it doing on port 443?"* grounded in the exact context you're looking at, not generic advice.
+- **🤝 Three-model consensus on every Inspect.** The forensic Inspect path doesn't just show codesign + YARA + binary trust — it runs **Claude, Codex, and Gemini in parallel** against the same evidence and synthesizes a `CONSENSUS_RISK` / `AGREEMENT` / `DIVERGENT` / `FINAL RECOMMENDATION` report. One model flagging a binary is suggestive; three converging is hard to dismiss.
+- **🔁 Smart fallback chain.** The Ask overlay tries `claude` first, auto-falls-back to `codex` then `gemini` on timeout or error. The prompt's status line reflects which assistant is currently working — `[claude thinking…]` → `[trying with codex…]` → `[trying with gemini…]`.
+- **🛡 Zero-stall under sudo.** When you run as root for memory-region YARA or `eslogger`, every assistant subprocess is wrapped to drop back to your real UID — so the local keychain still works and `claude` doesn't hang on auth.
+- **⚡ Resilient core.** Direct `libproc` / `sysctl` snapshots, no `fork()` per refresh. Survives fork bombs and memory exhaustion that knock `htop` and Activity Monitor offline.
+- **📜 LLM-summarized event streams.** Watch a live Endpoint Security stream, hit `Esc` once, and the captured exec / auth / TCC / XProtect events come back as an executive summary before the panel closes.
 
 > [!NOTE]
 > **Process-monitoring only.** Host-wide security posture — TCC, kernel/boot, persistence, browser extensions, CVE intelligence, full security scoring, remediation workflows, headless audit reports — lives in the sister project [`mac-system-security`](https://github.com/alex-iliadis/mac-system-security).
