@@ -3242,6 +3242,20 @@ class ProcMonUI:
         self._traffic_loading = False
         self._traffic_error = ""
         self._traffic_shim_path = ""
+        # ── Feature 1: Process Event Ripples ─────────────────────────
+        # When a PID's CPU% or net rate spikes between two refresh ticks
+        # (delta exceeds a configured threshold), its row briefly pulses
+        # with a highlight color. Each entry is (color_pair_id, frames_remaining).
+        self._row_pulses = {}
+        self._pulse_thresholds = {
+            "cpu_delta": 20.0,      # CPU% absolute delta
+            "net_delta_mbps": 1.0,  # net B/s -> MB/s threshold
+            "io_delta_mbps": 5.0,   # disk B/s -> MB/s threshold
+        }
+        self._pulse_frames = 4
+        # Snapshot of last-tick metrics for pulse delta computation. Keyed
+        # by pid so transient pids fall out of the dict naturally.
+        self._pulse_prev = {}  # pid -> {"cpu", "net", "io"}
         # Test-only TUI report capture. This is intentionally opt-in so the
         # normal user-facing UI stays unchanged. The harness uses it to export
         # the exact detail-pane buffer for post-run assertions.
@@ -3606,6 +3620,87 @@ class ProcMonUI:
             or (t["sent_mb"] > 0 and sent_mb > t["sent_mb"])
         )
 
+    # ── Feature 1: Process Event Ripples ──────────────────────────────
+
+    def _update_row_pulses(self, all_procs):
+        """Diff this tick's per-PID CPU / net / disk against the previous
+        snapshot and arm a colored pulse on rows whose deltas exceed the
+        configured thresholds.
+
+        - CPU spike (delta >= cpu_delta points)        → color_pair(12) salmon
+        - I/O burst (net + disk delta >= io_delta_mbps) → color_pair(11) light green
+        - Net burst (delta >= net_delta_mbps)           → color_pair(11) light green
+
+        The pulse decays one frame per render and is popped at zero.
+        """
+        # Decay first so pulses that didn't re-arm this tick fade out.
+        self._decay_row_pulses()
+        thresholds = self._pulse_thresholds
+        cpu_thr = float(thresholds.get("cpu_delta", 20.0))
+        net_thr = float(thresholds.get("net_delta_mbps", 1.0)) * 1024 * 1024
+        io_thr = float(thresholds.get("io_delta_mbps", 5.0)) * 1024 * 1024
+        new_prev = {}
+        for p in all_procs:
+            pid = p["pid"]
+            cpu = float(p.get("cpu", 0.0) or 0.0)
+            net_in = max(float(p.get("net_in", 0) or 0), 0.0)
+            net_out = max(float(p.get("net_out", 0) or 0), 0.0)
+            net_total = net_in + net_out
+            disk_in = max(float(p.get("disk_in", 0) or 0), 0.0)
+            disk_out = max(float(p.get("disk_out", 0) or 0), 0.0)
+            io_total = disk_in + disk_out
+            new_prev[pid] = {"cpu": cpu, "net": net_total, "io": io_total}
+            prev = self._pulse_prev.get(pid)
+            if not prev:
+                continue
+            cpu_delta = cpu - prev["cpu"]
+            net_delta = net_total - prev["net"]
+            io_delta = io_total - prev["io"]
+            if cpu_delta >= cpu_thr and cpu_thr > 0:
+                # CPU spike → salmon
+                self._row_pulses[pid] = (12, self._pulse_frames)
+            elif io_delta >= io_thr and io_thr > 0:
+                # Disk-I/O burst → light green
+                self._row_pulses[pid] = (11, self._pulse_frames)
+            elif net_delta >= net_thr and net_thr > 0:
+                # Net burst → light green
+                self._row_pulses[pid] = (11, self._pulse_frames)
+        self._pulse_prev = new_prev
+        # Drop pulses for pids that are gone
+        live_pids = set(new_prev.keys())
+        stale = [pid for pid in self._row_pulses if pid not in live_pids]
+        for pid in stale:
+            self._row_pulses.pop(pid, None)
+
+    def _row_pulse_attr(self, pid):
+        """Return the curses attr for an active pulse on this pid, or 0.
+
+        Read-only; decay is driven by `_decay_row_pulses` once per refresh
+        (called from collect_data) so multiple intra-tick re-renders all
+        see the same pulse intensity.
+        """
+        info = self._row_pulses.get(pid)
+        if not info:
+            return 0
+        color_pair_id, frames_remaining = info
+        if frames_remaining <= 0:
+            return 0
+        try:
+            attr = curses.color_pair(int(color_pair_id)) | curses.A_BOLD
+        except Exception:
+            attr = curses.A_BOLD
+        return attr
+
+    def _decay_row_pulses(self):
+        """Decrement every active pulse and pop entries that hit zero."""
+        if not self._row_pulses:
+            return
+        new_pulses = {}
+        for pid, (color_pair_id, frames_remaining) in self._row_pulses.items():
+            if frames_remaining > 1:
+                new_pulses[pid] = (color_pair_id, frames_remaining - 1)
+        self._row_pulses = new_pulses
+
     def _secondary_sort_key(self):
         """Return the sort key for the user-selected sort mode."""
         if self.sort_mode == SORT_CPU:
@@ -3830,6 +3925,15 @@ class ProcMonUI:
         self.rows = flat
         self._all_procs = matched
         self.matched_count = len(matched)
+
+        # Feature 1: Process Event Ripples — compute deltas vs the last
+        # tick and arm a pulse on rows whose CPU%, net rate, or disk-I/O
+        # rate jumped above the configured thresholds. Decay happens in
+        # the row renderer.
+        try:
+            self._update_row_pulses(all_procs)
+        except Exception:
+            pass
 
         # Restore selection by PID
         if sel_pid is not None:
@@ -4105,6 +4209,15 @@ class ProcMonUI:
                 self._put(y, 0, line[:w], curses.color_pair(11))
             else:
                 self._put(y, 0, line[:w], curses.A_NORMAL)
+
+            # Feature 1: Process Event Ripples — overlay an active pulse
+            # by repainting the *unselected* row text with the pulse
+            # color. Selected rows keep their highlight so the cursor
+            # never gets lost during a spike.
+            if idx != self.selected:
+                pulse_attr = self._row_pulse_attr(r["pid"])
+                if pulse_attr:
+                    self._put(y, 0, line[:w], pulse_attr)
 
             # Overlay per-cell red/yellow for individual metrics that exceed thresholds
             if idx != self.selected:

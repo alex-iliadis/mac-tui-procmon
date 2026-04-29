@@ -198,5 +198,14 @@ def monitor():
     mon._traffic_loading = False
     mon._traffic_error = ""
     mon._traffic_shim_path = ""
+    # Feature 1: Process Event Ripples
+    mon._row_pulses = {}
+    mon._pulse_thresholds = {
+        "cpu_delta": 20.0,
+        "net_delta_mbps": 1.0,
+        "io_delta_mbps": 5.0,
+    }
+    mon._pulse_frames = 4
+    mon._pulse_prev = {}
     mon._test_select_pid = 0
     return mon
