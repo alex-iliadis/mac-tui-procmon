@@ -235,5 +235,14 @@ def monitor():
     mon._consensus_risk_bar = 0
     mon._consensus_running = False
     mon._consensus_lane_max_lines = 60
+    # Feature 5: Attack Chain Replay
+    mon._events_persist_on_close = True
+    mon._replay_mode = False
+    mon._replay_events = []
+    mon._replay_cursor = 0
+    mon._replay_playing = False
+    mon._replay_speed = 1.0
+    mon._replay_driveby_pairs = set()
+    mon._replay_driveby_window_secs = 5.0
     mon._test_select_pid = 0
     return mon

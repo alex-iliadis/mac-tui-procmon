@@ -3354,6 +3354,20 @@ class ProcMonUI:
         self._consensus_risk_bar = 0  # percentage 0..100
         self._consensus_running = False
         self._consensus_lane_max_lines = 60
+        # ── Feature 5: Attack Chain Replay ───────────────────────────
+        # Persist the captured event buffer when the events stream
+        # closes so the user can scrub through it later. Heuristic
+        # linker tags exec-of-shell-after-curl as a "drive-by".
+        self._events_persist_on_close = True
+        self._replay_mode = False
+        self._replay_events = []
+        self._replay_cursor = 0
+        self._replay_playing = False
+        self._replay_speed = 1.0
+        # Cached drive-by hits keyed by (parent_curl_pid, child_shell_pid)
+        self._replay_driveby_pairs = set()
+        # Window for considering a curl→shell sequence "drive-by"
+        self._replay_driveby_window_secs = 5.0
         # Test-only TUI report capture. This is intentionally opt-in so the
         # normal user-facing UI stays unchanged. The harness uses it to export
         # the exact detail-pane buffer for post-run assertions.
@@ -4448,6 +4462,13 @@ class ProcMonUI:
                 detail_title += " \u2014 stream stopped, Esc again to close"
             max_detail_h = max(8, (h - y) * 2 // 3)
             detail_h = min(len(detail_all_lines) + 2, max_detail_h)
+        elif self._replay_mode:
+            detail_all_lines = self._format_replay_view(w)
+            n = len(self._replay_events)
+            detail_title = (f"Attack Chain Replay \u2014 "
+                             f"{self._replay_cursor + 1} / {n}")
+            max_detail_h = max(10, (h - y) * 3 // 4)
+            detail_h = min(len(detail_all_lines) + 2, max_detail_h)
         elif self._traffic_mode:
             detail_all_lines = self._format_traffic_view()
             detail_title = "Traffic Inspector (experimental)"
@@ -5058,6 +5079,7 @@ class ProcMonUI:
                 ("T", "Triage"),
                 ("U", "PIDlog"),
                 ("o", "Oscope"),
+                ("r", "Replay"),
                 ("?", "Ask"),
                 ("\\", "Narrator"),
                 ("L", "Log"),
@@ -5247,6 +5269,25 @@ class ProcMonUI:
                     self._stop_unified_log_stream()
                     return False
                 return True
+            elif self._replay_mode:
+                # Feature 5: Attack Chain Replay scrubbing.
+                if key == curses.KEY_LEFT:
+                    self._replay_step(-1)
+                elif key == curses.KEY_RIGHT:
+                    self._replay_step(1)
+                elif key == curses.KEY_PPAGE:
+                    self._replay_step(-10)
+                elif key == curses.KEY_NPAGE:
+                    self._replay_step(10)
+                elif key == ord(" "):
+                    self._replay_toggle_play()
+                elif key == ord("\t"):
+                    self._detail_focus = False
+                elif key == 27:
+                    self._exit_replay_mode()
+                elif key == ord("q"):
+                    return False
+                return True
             else:
                 # Net mode detail focus
                 n = len(self._net_entries) or 1
@@ -5324,6 +5365,12 @@ class ProcMonUI:
             self._toggle_unified_log_mode()
         elif key == ord("o"):
             self._toggle_oscilloscope_mode()
+        elif key == ord("r"):
+            # Feature 5: enter Attack Chain Replay if a buffer was captured.
+            if self._replay_mode:
+                self._exit_replay_mode()
+            else:
+                self._start_replay_mode()
         elif key == ord("\\"):
             self._toggle_narrator_mode()
         elif key == ord("\t"):
@@ -5331,7 +5378,8 @@ class ProcMonUI:
                     or self._events_mode
                     or self._audit_mode or self._traffic_mode
                     or self._unified_log_mode
-                    or self._oscilloscope_mode):
+                    or self._oscilloscope_mode
+                    or self._replay_mode):
                 self._detail_focus = True
         elif key == ord("C"):  # Shift+C — alert config
             self._prompt_config()
@@ -5340,7 +5388,9 @@ class ProcMonUI:
         elif key == ord("k"):
             self._kill_selected()
         elif key == 27:  # Escape
-            if self._oscilloscope_mode:
+            if self._replay_mode:
+                self._exit_replay_mode()
+            elif self._oscilloscope_mode:
                 self._oscilloscope_mode = False
                 self._oscilloscope_pid = None
                 self._detail_focus = False
@@ -6668,9 +6718,174 @@ class ProcMonUI:
             }
         return None
 
+    # ── Feature 5: Attack Chain Replay ─────────────────────────────────
+
+    def _detect_driveby_pairs(self, events):
+        """Heuristic linking: flag (parent_pid, child_pid) pairs where a
+        curl/wget exec is followed by a `bash -c` exec within the
+        configured window.
+
+        Returns a set of (parent_pid, child_pid) tuples.
+        """
+        pairs = set()
+        downloaders = []  # (idx, pid, ts_monotonic)
+        for idx, evt in enumerate(events):
+            kind = evt.get("kind", "")
+            if kind != "exec":
+                continue
+            cmd = (evt.get("cmd") or "").lower()
+            pid = evt.get("pid", 0)
+            ppid = evt.get("ppid", 0)
+            ts_mono = evt.get("ts_mono")
+            if ts_mono is None:
+                ts_mono = idx * 1.0  # fallback ordering when no clock
+            # Identify a shell-with-command exec first — catches the
+            # `bash -c "curl x | sh"` case where curl appears inside the
+            # shell command line, not as a separate exec.
+            is_shell = any(s in cmd for s in (
+                "bash -c", "sh -c", "zsh -c", "/bin/bash ", "/bin/sh "))
+            if is_shell:
+                pass  # fall through to pair-up logic below
+            elif any(tok in cmd for tok in ("curl", "wget")):
+                # Standalone downloader (the parent in a multi-exec
+                # drive-by). Stash and move on.
+                downloaders.append((idx, pid, ts_mono))
+                continue
+            else:
+                continue
+            for d_idx, d_pid, d_ts in downloaders:
+                # Same ancestry (the shell is invoked by the downloader's
+                # parent or descendant chain) is the strict version; in
+                # practice curl spawning a shell is the obvious one. We
+                # accept either ppid==d_pid OR within the window.
+                if ts_mono - d_ts > self._replay_driveby_window_secs:
+                    continue
+                if ppid == d_pid or pid == d_pid:
+                    pairs.add((d_pid, pid))
+                else:
+                    # Looser match: same parent process tree within window.
+                    pairs.add((d_pid, pid))
+        return pairs
+
+    def _start_replay_mode(self):
+        """Snapshot the captured event buffer and enter replay mode."""
+        with self._events_lock:
+            snap = list(self._events)
+        if not snap:
+            return False
+        # Annotate each event with monotonic-ish ordering for the linker.
+        for idx, evt in enumerate(snap):
+            evt.setdefault("ts_mono", idx * 1.0)
+        self._replay_events = snap
+        self._replay_cursor = 0
+        self._replay_playing = False
+        self._replay_driveby_pairs = self._detect_driveby_pairs(snap)
+        self._replay_mode = True
+        self._detail_focus = True
+        return True
+
+    def _exit_replay_mode(self):
+        self._replay_mode = False
+        self._replay_playing = False
+        self._detail_focus = False
+
+    def _replay_step(self, delta):
+        """Advance / rewind the replay cursor; clamp to bounds."""
+        if not self._replay_events:
+            return
+        n = len(self._replay_events)
+        self._replay_cursor = max(0, min(n - 1, self._replay_cursor + delta))
+
+    def _replay_toggle_play(self):
+        self._replay_playing = not self._replay_playing
+
+    def _replay_advance_if_playing(self):
+        if not (self._replay_mode and self._replay_playing):
+            return False
+        n = len(self._replay_events)
+        if n <= 0:
+            return False
+        if self._replay_cursor >= n - 1:
+            self._replay_playing = False
+            return False
+        self._replay_cursor = min(n - 1,
+                                   self._replay_cursor + max(1, int(self._replay_speed)))
+        return True
+
+    def _replay_density_timeline(self, width):
+        """Render an event-density bar with a marker for current cursor."""
+        n = len(self._replay_events)
+        if n == 0 or width <= 4:
+            return ""
+        buckets = max(1, min(width, 80))
+        counts = [0] * buckets
+        for i, _ in enumerate(self._replay_events):
+            b = min(buckets - 1, int(i / max(1, n) * buckets))
+            counts[b] += 1
+        peak = max(counts) or 1
+        glyphs = " ▁▂▃▄▅▆▇█"
+        bar_chars = []
+        for c in counts:
+            idx = min(len(glyphs) - 1, int(c / peak * (len(glyphs) - 1)))
+            bar_chars.append(glyphs[idx])
+        bar = "".join(bar_chars)
+        # Marker for cursor.
+        marker_pos = min(buckets - 1,
+                          int(self._replay_cursor / max(1, n - 1) * (buckets - 1)))
+        marker_line = list(" " * buckets)
+        marker_line[marker_pos] = "▲"
+        return bar + "\n" + "".join(marker_line)
+
+    def _format_replay_view(self, width):
+        """Build display lines for replay mode."""
+        lines = []
+        n = len(self._replay_events)
+        if n == 0:
+            lines.append(" No replay events captured yet — start an"
+                         " events stream first.")
+            return lines
+        cur = self._replay_events[max(0, min(n - 1, self._replay_cursor))]
+        kind = cur.get("kind", "")
+        sev = cur.get("severity") or self._EVENT_KIND_SEVERITY.get(
+            kind, "INFO")
+        label = cur.get("label") or self._EVENT_KIND_LABELS.get(kind, kind)
+        cmd = (cur.get("cmd") or "")[:width - 20]
+        pid = cur.get("pid", 0)
+        ppid = cur.get("ppid", 0)
+        playing = "▶ playing" if self._replay_playing else "⏸ paused"
+        lines.append(f" Replay {playing}  [{self._replay_cursor + 1} / {n}]")
+        lines.append("")
+        lines.append(f" [{sev}] {label}")
+        lines.append(f"  pid={pid}  ppid={ppid}")
+        lines.append(f"  {cmd}")
+        # Drive-by tag: if this event is the child in a flagged pair, or
+        # the parent curl in such a pair, highlight it.
+        flagged = any(pid == p or pid == c
+                       for (p, c) in self._replay_driveby_pairs)
+        if flagged:
+            lines.append("")
+            lines.append(" ⚠ Potential drive-by — curl→shell pattern flagged")
+        lines.append("")
+        timeline = self._replay_density_timeline(min(80, width - 4))
+        if timeline:
+            for tl in timeline.split("\n"):
+                lines.append(" " + tl)
+        lines.append("")
+        lines.append(" ←/→  step    space toggle play    Esc close")
+        return lines
+
     def _toggle_events_mode(self):
         """Toggle live security timeline mode."""
         if self._events_mode:
+            # Persist the captured buffer so the user can replay it.
+            if self._events_persist_on_close:
+                with self._events_lock:
+                    self._replay_events = list(self._events)
+                # Annotate ordering for the heuristic linker.
+                for idx, evt in enumerate(self._replay_events):
+                    evt.setdefault("ts_mono", idx * 1.0)
+                self._replay_driveby_pairs = self._detect_driveby_pairs(
+                    self._replay_events)
             self._stop_events_stream()
             self._events_mode = False
             self._detail_focus = False
@@ -10222,6 +10437,12 @@ class ProcMonUI:
                 if self._narrator_pending is not None:
                     if self._poll_narrator_result():
                         self.render()
+            except Exception:
+                pass
+            # Feature 5: Attack Chain Replay — auto-advance when playing.
+            try:
+                if self._replay_advance_if_playing():
+                    self.render()
             except Exception:
                 pass
             # Poll per-scope LLM summaries (audit, inspect, events). Each slot
