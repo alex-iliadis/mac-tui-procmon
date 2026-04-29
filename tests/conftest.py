@@ -207,5 +207,21 @@ def monitor():
     }
     mon._pulse_frames = 4
     mon._pulse_prev = {}
+    # Feature 2: AI Narrator
+    import threading as _t_narrator
+    mon._narrator_enabled = False
+    mon._narrator_last_tick = 0.0
+    mon._narrator_interval = 15.0
+    mon._narrator_caption = ""
+    mon._narrator_target_pid = None
+    mon._narrator_target_cmd = ""
+    mon._narrator_speak = True
+    mon._narrator_worker = None
+    mon._narrator_pending = None
+    mon._narrator_loading = False
+    mon._narrator_seen_pids = {}
+    mon._narrator_history = []
+    mon._narrator_history_max = 20
+    mon._narrator_speak_lock = _t_narrator.Lock()
     mon._test_select_pid = 0
     return mon

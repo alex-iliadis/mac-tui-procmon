@@ -3256,6 +3256,24 @@ class ProcMonUI:
         # Snapshot of last-tick metrics for pulse delta computation. Keyed
         # by pid so transient pids fall out of the dict naturally.
         self._pulse_prev = {}  # pid -> {"cpu", "net", "io"}
+        # ── Feature 2: AI Narrator / Guided Spotlight ───────────────
+        # Periodically picks the most-anomalous threshold-exceeding row,
+        # frames it, and renders an LLM-generated one-line caption. Can
+        # also speak it via macOS `say` (gated on speak flag + binary).
+        self._narrator_enabled = False
+        self._narrator_last_tick = 0.0
+        self._narrator_interval = 15.0  # seconds between captions
+        self._narrator_caption = ""
+        self._narrator_target_pid = None
+        self._narrator_target_cmd = ""
+        self._narrator_speak = True
+        self._narrator_worker = None
+        self._narrator_pending = None
+        self._narrator_loading = False
+        self._narrator_seen_pids = {}   # pid -> last_seen_monotonic
+        self._narrator_history = []     # ring of last-spotlighted (pid, caption)
+        self._narrator_history_max = 20
+        self._narrator_speak_lock = threading.Lock()
         # Test-only TUI report capture. This is intentionally opt-in so the
         # normal user-facing UI stays unchanged. The harness uses it to export
         # the exact detail-pane buffer for post-run assertions.
@@ -3700,6 +3718,200 @@ class ProcMonUI:
             if frames_remaining > 1:
                 new_pulses[pid] = (color_pair_id, frames_remaining - 1)
         self._row_pulses = new_pulses
+
+    # ── Feature 2: AI Narrator / Guided Spotlight ─────────────────────
+
+    def _toggle_narrator_mode(self):
+        """Toggle the narrator on/off (default keybinding: backslash)."""
+        self._narrator_enabled = not self._narrator_enabled
+        if not self._narrator_enabled:
+            self._narrator_caption = ""
+            self._narrator_target_pid = None
+            self._narrator_target_cmd = ""
+        else:
+            # Force first caption on next tick by resetting the timer.
+            self._narrator_last_tick = 0.0
+
+    def _narrator_anomaly_score(self, p):
+        """Score a row's anomaly level (higher = more interesting)."""
+        score = 0.0
+        if self._exceeds_threshold(p):
+            score += 100.0
+        score += float(p.get("agg_cpu", p.get("cpu", 0)) or 0.0)
+        # Memory in GB scaled to single-digit weight
+        rss_kb = p.get("agg_rss_kb", p.get("rss_kb", 0)) or 0
+        score += rss_kb / (1024.0 * 1024.0) * 5.0
+        net_in = max(p.get("agg_net_in", p.get("net_in", 0)) or 0, 0)
+        net_out = max(p.get("agg_net_out", p.get("net_out", 0)) or 0, 0)
+        score += (net_in + net_out) / (1024.0 * 1024.0)
+        # Novelty bonus — pid we haven't seen in the last 60s gets +25
+        last = self._narrator_seen_pids.get(p["pid"])
+        now = time.monotonic()
+        if last is None or now - last > 60.0:
+            score += 25.0
+        # Active pulse → +50 (something just happened)
+        if p["pid"] in self._row_pulses:
+            score += 50.0
+        return score
+
+    def _select_narrator_target(self):
+        """Walk current rows and pick the highest-anomaly-scored process.
+
+        Returns the row dict or None when no candidate is interesting.
+        """
+        if not self.rows:
+            return None
+        best = None
+        best_score = -1.0
+        for r in self.rows:
+            sc = self._narrator_anomaly_score(r)
+            if sc > best_score:
+                best = r
+                best_score = sc
+        # Skip if nothing is even mildly interesting (no spike, no novelty,
+        # no pulse). Threshold 25.0 ≈ "novelty floor" so the narrator only
+        # speaks when something is worth narrating.
+        if best is None or best_score < 25.0:
+            return None
+        return best
+
+    def _maybe_run_narrator(self):
+        """Call this from the run loop; fires a caption every interval."""
+        if not self._narrator_enabled:
+            return
+        if self._narrator_loading:
+            return
+        now = time.monotonic()
+        if now - self._narrator_last_tick < self._narrator_interval:
+            return
+        target = self._select_narrator_target()
+        if not target:
+            return
+        self._narrator_last_tick = now
+        self._narrator_seen_pids[target["pid"]] = now
+        self._narrator_target_pid = target["pid"]
+        cmd = target.get("command", "")
+        self._narrator_target_cmd = cmd.split()[0].rsplit("/", 1)[-1][:32] if cmd else ""
+        self._narrator_loading = True
+        self._narrator_pending = None
+        # Snapshot the metric values now — the worker thread should not
+        # iterate self.rows directly (race against collect_data).
+        snap = {
+            "pid": target["pid"],
+            "cmd": target.get("command", ""),
+            "cpu": target.get("agg_cpu", target.get("cpu", 0)) or 0.0,
+            "rss_mb": (target.get("agg_rss_kb", target.get("rss_kb", 0)) or 0) / 1024.0,
+            "net_in": max(target.get("agg_net_in", target.get("net_in", 0)) or 0, 0),
+            "net_out": max(target.get("agg_net_out", target.get("net_out", 0)) or 0, 0),
+            "ppid": target.get("ppid", 0),
+        }
+        self._narrator_worker = threading.Thread(
+            target=self._narrator_worker_fn, args=(snap,), daemon=True)
+        self._narrator_worker.start()
+
+    def _narrator_worker_fn(self, snap):
+        """Background worker: ask an LLM for a one-line narration."""
+        try:
+            caption = self._narrator_generate_caption(snap)
+        except Exception as e:
+            caption = f"[narrator error: {e}]"
+        if not caption:
+            caption = (
+                f"PID {snap['pid']} ({snap.get('cmd','?')[:30]}) "
+                f"is using {snap['cpu']:.1f}% CPU "
+                f"and {snap['rss_mb']:.0f} MB.")
+        self._narrator_pending = caption
+
+    def _narrator_generate_caption(self, snap):
+        """Run the existing LLM fallback chain to generate a caption.
+
+        Tests stub this method out; we never call real LLMs in tests.
+        """
+        if getattr(self, "_test_mode", False):
+            return (
+                f"PID {snap['pid']} ({snap.get('cmd','?')[:30]}) "
+                f"is the most active process this cycle.")
+        prompt = (
+            "You are an expert macOS process narrator. In ONE SHORT "
+            "sentence (max 25 words), narrate why this process deserves "
+            "attention right now. Be specific to the metrics; do NOT "
+            "speculate beyond them. No greetings, no preamble, no "
+            "trailing period necessary."
+        )
+        body = (
+            f"PID: {snap['pid']}\n"
+            f"command: {snap.get('cmd','')}\n"
+            f"cpu: {snap['cpu']:.1f}%\n"
+            f"memory: {snap['rss_mb']:.0f} MB\n"
+            f"net_in: {snap['net_in']:.0f} B/s\n"
+            f"net_out: {snap['net_out']:.0f} B/s\n"
+            f"ppid: {snap.get('ppid',0)}\n"
+        )
+        env = {
+            **os.environ,
+            "PATH": _USER_TOOL_PATH,
+            "HOME": _EFFECTIVE_HOME,
+        }
+        sudo_user = os.environ.get("SUDO_USER")
+        if sudo_user:
+            env["USER"] = sudo_user
+            env["LOGNAME"] = sudo_user
+        for label, argv in (
+            ("claude", ["claude", "-p", "--no-session-persistence",
+                        "--dangerously-skip-permissions", prompt]),
+            ("codex", ["codex", "exec",
+                        "--dangerously-bypass-approvals-and-sandbox",
+                        "--color", "never", prompt]),
+            ("gemini", ["gemini", "-p", prompt, "-y"]),
+        ):
+            ok, text = self._run_assistant_attempt(
+                argv, body, env, 30, label)
+            if ok:
+                return text.strip().split("\n")[0][:240]
+        return ""
+
+    def _poll_narrator_result(self):
+        """Pick up narrator-worker output. Returns True on state change."""
+        if self._narrator_pending is None:
+            return False
+        caption = self._narrator_pending
+        self._narrator_pending = None
+        self._narrator_loading = False
+        if not self._narrator_enabled:
+            return False
+        self._narrator_caption = caption
+        self._narrator_history.append(
+            (self._narrator_target_pid, caption))
+        if len(self._narrator_history) > self._narrator_history_max:
+            self._narrator_history.pop(0)
+        if self._narrator_speak:
+            self._narrator_speak_async(caption)
+        return True
+
+    def _narrator_speak_async(self, caption):
+        """Spawn `say` to speak the caption. Macos-only, gated on shutil."""
+        if not caption:
+            return
+        try:
+            import shutil
+            say_bin = shutil.which("say")
+        except Exception:
+            say_bin = None
+        if not say_bin:
+            return
+
+        def _do_speak():
+            with self._narrator_speak_lock:
+                try:
+                    subprocess.Popen(
+                        [say_bin, "-v", "Samantha", caption],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                except Exception:
+                    pass
+
+        threading.Thread(target=_do_speak, daemon=True).start()
 
     def _secondary_sort_key(self):
         """Return the sort key for the user-selected sort mode."""
@@ -4279,6 +4491,14 @@ class ProcMonUI:
             # Hidden process marker
             if r["pid"] in self._hidden_pids and idx != self.selected:
                 self._put(y, 0, "!", curses.color_pair(5) | curses.A_BOLD)
+            # Feature 2: AI Narrator spotlight marker on the active target.
+            if (self._narrator_enabled
+                    and self._narrator_target_pid is not None
+                    and r["pid"] == self._narrator_target_pid):
+                # ► prefix in narrator color (light green) so the eye
+                # tracks it during a screencast.
+                self._put(y, 0, "▶",
+                          curses.color_pair(11) | curses.A_BOLD)
             y += 1
 
         # ── Scroll indicator ──
@@ -4313,6 +4533,20 @@ class ProcMonUI:
                                       detail_all_lines, scroll)
         self._render_detail(detail_y, w, detail_all_lines, detail_title,
                             scroll, self._detail_focus, sel_line)
+
+        # Feature 2: Narrator caption banner. Renders one line just above
+        # the shortcut bar when the narrator is on AND a caption exists.
+        if self._narrator_enabled and (self._narrator_caption
+                                        or self._narrator_loading):
+            cy = h - 2
+            if self._narrator_loading:
+                banner = " [Narrator] thinking…"
+            else:
+                pid_str = (f" PID {self._narrator_target_pid}: "
+                           if self._narrator_target_pid else " ")
+                banner = f" [Narrator]{pid_str}{self._narrator_caption}"
+            self._put(cy, 0, banner.ljust(w)[:w],
+                       curses.color_pair(11) | curses.A_BOLD)
 
         # ── Shortcut bar (mc-style) ──
         self._render_shortcut_bar(h, w)
@@ -4718,6 +4952,7 @@ class ProcMonUI:
                 ("T", "Triage"),
                 ("U", "PIDlog"),
                 ("?", "Ask"),
+                ("\\", "Narrator"),
                 ("L", "Log"),
                 ("f", "Filter"),
                 ("C", "Config"),
@@ -4980,6 +5215,8 @@ class ProcMonUI:
             self._toggle_process_triage_mode()
         elif key == ord("U"):
             self._toggle_unified_log_mode()
+        elif key == ord("\\"):
+            self._toggle_narrator_mode()
         elif key == ord("\t"):
             if (self._inspect_mode or self._net_mode
                     or self._events_mode
@@ -9606,6 +9843,14 @@ class ProcMonUI:
             if self._audit_pending is not None:
                 if self._poll_audit_result():
                     self.render()
+            # Feature 2: AI Narrator — runs every interval; non-blocking.
+            try:
+                self._maybe_run_narrator()
+                if self._narrator_pending is not None:
+                    if self._poll_narrator_result():
+                        self.render()
+            except Exception:
+                pass
             # Poll per-scope LLM summaries (audit, inspect, events). Each slot
             # is independent; rendering the finished panel kicks the viewport
             # up by its height.

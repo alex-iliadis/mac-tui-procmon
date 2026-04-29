@@ -94,3 +94,124 @@ class TestRowPulses:
         # Process 1 disappears — pulse should be dropped immediately.
         monitor._update_row_pulses([_proc(2, cpu=2.0)])
         assert 1 not in monitor._row_pulses
+
+
+# ── 2. AI Narrator / Guided Spotlight ─────────────────────────────────
+
+
+def _row(pid, cmd="proc", cpu=0.0, rss_kb=0, threads=1,
+          ppid=1, net_in=0, net_out=0):
+    return {
+        "pid": pid, "ppid": ppid, "cpu": cpu, "agg_cpu": cpu,
+        "rss_kb": rss_kb, "agg_rss_kb": rss_kb, "threads": threads,
+        "agg_threads": threads, "fds": 0, "forks": 0,
+        "net_in": net_in, "net_out": net_out,
+        "agg_net_in": net_in, "agg_net_out": net_out,
+        "bytes_in": 0, "bytes_out": 0,
+        "agg_bytes_in": 0, "agg_bytes_out": 0,
+        "command": cmd, "depth": 0, "prefix": "",
+        "has_children": False, "is_collapsed": False,
+    }
+
+
+class TestNarrator:
+    def test_toggle_on_off(self, monitor):
+        assert monitor._narrator_enabled is False
+        monitor._toggle_narrator_mode()
+        assert monitor._narrator_enabled is True
+        monitor._toggle_narrator_mode()
+        assert monitor._narrator_enabled is False
+
+    def test_anomaly_score_prefers_high_cpu(self, monitor):
+        idle = _row(1, cpu=0.5, rss_kb=10 * 1024)
+        busy = _row(2, cpu=85.0, rss_kb=10 * 1024)
+        assert (monitor._narrator_anomaly_score(busy)
+                > monitor._narrator_anomaly_score(idle))
+
+    def test_select_target_returns_none_for_idle_rows(self, monitor):
+        # No pulse, no novelty bonus past 60s — recently-seen quiet rows
+        # should NOT trigger narration.
+        monitor.rows = [_row(1, cpu=0.0)]
+        # Mark pid 1 as seen recently so the novelty bonus is gone.
+        monitor._narrator_seen_pids[1] = time.monotonic()
+        assert monitor._select_narrator_target() is None
+
+    def test_select_target_returns_busy_row(self, monitor):
+        monitor.rows = [
+            _row(1, cmd="idle", cpu=0.0),
+            _row(2, cmd="busy", cpu=90.0, rss_kb=4 * 1024 * 1024),
+        ]
+        target = monitor._select_narrator_target()
+        assert target is not None
+        assert target["pid"] == 2
+
+    def test_maybe_run_narrator_only_when_enabled(self, monitor):
+        monitor.rows = [_row(2, cpu=90.0)]
+        monitor._narrator_enabled = False
+        monitor._maybe_run_narrator()
+        assert monitor._narrator_loading is False
+        assert monitor._narrator_target_pid is None
+
+    def test_maybe_run_narrator_fires_caption_when_enabled(self, monitor):
+        monitor.rows = [_row(7, cmd="suspicious", cpu=90.0,
+                              rss_kb=4 * 1024 * 1024)]
+        monitor._narrator_enabled = True
+        monitor._narrator_last_tick = 0.0
+        with patch.object(monitor, "_narrator_generate_caption",
+                           return_value="PID 7 is spiking."):
+            monitor._maybe_run_narrator()
+            # Wait for worker
+            for _ in range(50):
+                if monitor._narrator_pending is not None:
+                    break
+                time.sleep(0.02)
+        assert monitor._narrator_target_pid == 7
+        assert monitor._narrator_pending == "PID 7 is spiking."
+
+    def test_speak_only_when_speak_flag_true(self, monitor):
+        monitor._narrator_enabled = True
+        monitor._narrator_speak = False
+        monitor._narrator_pending = "Hello world"
+        with patch.object(monitor, "_narrator_speak_async") as spk:
+            monitor._poll_narrator_result()
+        spk.assert_not_called()
+
+    def test_speak_called_when_flag_true(self, monitor):
+        monitor._narrator_enabled = True
+        monitor._narrator_speak = True
+        monitor._narrator_pending = "Hello world"
+        monitor._narrator_target_pid = 1
+        with patch.object(monitor, "_narrator_speak_async") as spk:
+            monitor._poll_narrator_result()
+        spk.assert_called_once()
+
+    def test_speak_async_invokes_say_subprocess(self, monitor):
+        with patch("subprocess.Popen") as popen:
+            with patch("shutil.which", return_value="/usr/bin/say"):
+                monitor._narrator_speak_async("hi there")
+                # Spawned in a daemon thread; give it a moment.
+                for _ in range(50):
+                    if popen.called:
+                        break
+                    time.sleep(0.02)
+        assert popen.called
+        argv = popen.call_args[0][0]
+        assert argv[0] == "/usr/bin/say"
+        assert "hi there" in argv
+
+    def test_speak_async_skips_when_say_missing(self, monitor):
+        with patch("shutil.which", return_value=None):
+            with patch("subprocess.Popen") as popen:
+                monitor._narrator_speak_async("hi there")
+                time.sleep(0.05)
+                popen.assert_not_called()
+
+    def test_history_capped(self, monitor):
+        monitor._narrator_enabled = True
+        monitor._narrator_history_max = 3
+        for i in range(10):
+            monitor._narrator_target_pid = i
+            monitor._narrator_pending = f"caption{i}"
+            with patch.object(monitor, "_narrator_speak_async"):
+                monitor._poll_narrator_result()
+        assert len(monitor._narrator_history) == 3
