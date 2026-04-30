@@ -5844,6 +5844,23 @@ class ProcMonUI:
                 inner_lines.append(" " * inner_w)
         # Trim if we somehow generated extra
         inner_lines = inner_lines[: bh - 2]
+
+        # Mini-sparkline on the bottom inner row for tier ≥3 bubbles
+        # (size 13+). Pulls the recent CPU history from the per-PID
+        # ring buffer the existing TREND code already populates. Brand
+        # new PIDs with no samples render a blank row, no crash.
+        if bw >= 13 and len(inner_lines) >= 1:
+            pid = row.get("pid")
+            spark_chars = ""
+            hist = self._metric_history.get(pid) if pid is not None else None
+            if hist:
+                cpu_dq = hist.get("cpu")
+                if cpu_dq:
+                    samples = list(cpu_dq)[-inner_w:]
+                    spark_chars = _sparkline(samples, width=inner_w)
+            spark_line = _center(spark_chars, inner_w) if spark_chars \
+                else " " * inner_w
+            inner_lines[-1] = spark_line
         top = "╭" + "─" * inner_w + "╮"
         bot = "╰" + "─" * inner_w + "╯"
         return [top] + ["│" + line + "│" for line in inner_lines] + [bot]

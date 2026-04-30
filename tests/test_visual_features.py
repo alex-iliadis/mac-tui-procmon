@@ -972,6 +972,57 @@ class TestProcessGalaxy:
         body = "\n".join(lines[1:-1])
         assert procmon.ProcMonUI._GALAXY_VENDOR_GLYPHS["unknown"] in body
 
+    # ── Feature 4: Mini-sparklines inside heavy bubbles ─────────────
+
+    def test_sparkline_in_tier3_bubble(self, monitor):
+        import collections as _c
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        # tier-3 bubble (size 13×4)
+        row = {"pid": 555, "command": "/Applications/Slack.app/Contents/"
+               "MacOS/Slack", "agg_cpu": 8.0, "agg_rss_kb": 100 * 1024}
+        # Populate 30 CPU samples — varied so the sparkline renders blocks.
+        dq = _c.deque(maxlen=60)
+        for i in range(30):
+            dq.append(float(i % 8))
+        monitor._metric_history[555] = {"cpu": dq}
+        bw, bh = monitor._galaxy_bubble_size(row)
+        assert (bw, bh) == (13, 4)
+        lines = monitor._galaxy_render_bubble(row, bw, bh)
+        bottom_inner = lines[-2]  # bh-2 inner; -2 from outer = last inner
+        # Bottom inner row contains at least one block-glyph.
+        assert any(c in bottom_inner for c in "▁▂▃▄▅▆▇█"), \
+            f"expected sparkline blocks on bottom inner row: {bottom_inner!r}"
+
+    def test_sparkline_blank_for_new_pid(self, monitor):
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        row = {"pid": 999, "command": "/Applications/Slack.app/Contents/"
+               "MacOS/Slack", "agg_cpu": 8.0, "agg_rss_kb": 100 * 1024}
+        # No history at all for this pid.
+        bw, bh = monitor._galaxy_bubble_size(row)
+        # Must not raise.
+        lines = monitor._galaxy_render_bubble(row, bw, bh)
+        assert len(lines) == bh
+        # Bottom inner row contains no block-glyphs (no samples yet).
+        bottom_inner = lines[-2]
+        assert not any(c in bottom_inner for c in "▁▂▃▄▅▆▇█")
+
+    def test_sparkline_only_for_tier3_or_higher(self, monitor):
+        import collections as _c
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        # tier-1 bubble: 11x3, no sparkline expected.
+        row = {"pid": 777, "command": "/Applications/Slack.app/Contents/"
+               "MacOS/Slack", "agg_cpu": 1.0, "agg_rss_kb": 50 * 1024}
+        dq = _c.deque(maxlen=60)
+        for i in range(30):
+            dq.append(float(i % 8))
+        monitor._metric_history[777] = {"cpu": dq}
+        bw, bh = monitor._galaxy_bubble_size(row)
+        assert bw == 11
+        lines = monitor._galaxy_render_bubble(row, bw, bh)
+        joined = "\n".join(lines[1:-1])
+        assert not any(c in joined for c in "▁▂▃▄▅▆▇█"), \
+            "tier-1 bubbles must not render sparklines"
+
     def test_aspect_correction_uses_doubled_min_dy(self):
         """Static check: the overlap solver's required vertical
         separation is doubled to compensate for ~2:1 terminal cells."""
