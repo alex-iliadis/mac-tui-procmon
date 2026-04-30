@@ -2,9 +2,9 @@
 
 # mac-tui-procmon
 
-### The process monitor that answers back.
+### AI forensics plus a crypto-bubble PID galaxy, inside your Mac terminal.
 
-**An AI-augmented terminal UI process monitor for macOS. Every screen — process tree, forensic inspect, network panel, live security timeline — is one keystroke away from a context-grounded conversation with the assistant of your choice. Built on direct `libproc` / `sysctl` calls so it stays up while the host falls apart.**
+**A macOS terminal process monitor that turns live PIDs into a crypto-bubble style galaxy and lets you ask AI about whatever is on screen. Every view — galaxy, process tree, forensic inspect, network panel, live security timeline — is one keystroke away from a context-grounded Claude / Codex / Gemini workflow. Built on direct `libproc` / `sysctl` calls so it stays up while the host falls apart.**
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](LICENSE)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue)
@@ -16,11 +16,12 @@
 </div>
 
 <p align="center">
-  <img src="screenshots/general-view.png" alt="mac-tui-procmon main view">
+  <img src="screenshots/process-galaxy.png" alt="mac-tui-procmon crypto-bubble Process Galaxy in a macOS terminal">
 </p>
 
 ## Why it's different
 
+- **🌌 Crypto-bubble PIDs in Terminal.** Press `G` and the process list becomes a fullscreen macOS terminal galaxy: load-sized PID bubbles, vendor colors, fork rings, packet trails, comet streaks, and a gravity-lens swirl around the hottest process.
 - **🧠 Ask the screen.** Press `?` from anywhere — process list, inspect view, network panel, security timeline — and an LLM answers *"what is this thing? is it suspicious? what's it doing on port 443?"* grounded in the exact context you're looking at, not generic advice.
 - **🤝 Three-model consensus on every Inspect.** The forensic Inspect path doesn't just show codesign + YARA + binary trust — it runs **Claude, Codex, and Gemini in parallel** against the same evidence and synthesizes a `CONSENSUS_RISK` / `AGREEMENT` / `DIVERGENT` / `FINAL RECOMMENDATION` report. One model flagging a binary is suggestive; three converging is hard to dismiss.
 - **🔁 Smart fallback chain.** The Ask overlay tries `claude` first, auto-falls-back to `codex` then `gemini` on timeout or error. The prompt's status line reflects which assistant is currently working — `[claude thinking…]` → `[trying with codex…]` → `[trying with gemini…]`.
@@ -36,7 +37,7 @@
 - **🏎 Three-Model Consensus Race.** While Inspect runs its analyses, claude / codex / gemini stream into three side-by-side lanes with live spinners and a `CONSENSUS_RISK` bar that fills 33% per finished lane; a divergence flasher fires when the lanes disagree on risk level.
 - **▶ Attack Chain Replay.** Captured event buffers persist on close; press `r` to enter a scrubbable replay with `←` / `→` / `space`, an event-density timeline at the bottom, and a heuristic linker that flags `curl → bash -c` patterns as potential drive-bys.
 - **🪐 Network Orbit.** From any network panel, press `g` for an animated constellation: the selected PID at the center, each remote endpoint orbiting on a circle, edges colored by service (HTTPS blue, HTTP yellow, SSH cyan, UDP magenta), animated `●` particles travelling along each edge to imply throughput.
-- **🌌 Process Galaxy.** Press `G` for a fullscreen process galaxy: load-sized bubbles drift by vendor cluster, new PIDs flare with fork rings, active parent/child pairs emit packet trails, and the heaviest process bends the field with a subtle orbiting gravity lens.
+- **🌌 Process Galaxy.** The same PID galaxy doubles as a working process picker: arrow between bubbles, hit Enter to Inspect, and keep the visual map as the front door for live AI-assisted triage.
 
 > [!NOTE]
 > **Process-monitoring only.** Host-wide security posture — TCC, kernel/boot, persistence, browser extensions, CVE intelligence, full security scoring, remediation workflows, headless audit reports — lives in the sister project [`mac-system-security`](https://github.com/alex-iliadis/mac-system-security).

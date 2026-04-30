@@ -28,8 +28,8 @@ Every user-facing feature in `mac-tui-procmon`, grouped by what it does.
   hotkey.
 - **Filter (`f`).** Substring filter on command name; supports
   multiple include and exclude patterns.
-- **Process Galaxy (`G`).** Fullscreen activity map of the current
-  process snapshot. Processes render as load-sized, vendor-colored
+- **Process Galaxy (`G`).** Fullscreen crypto-bubble style PID map
+  in the terminal. Processes render as load-sized, vendor-colored
   bubbles with top-three rank badges, fork rings for new PIDs,
   heat trails, packet tails between active parent/child pairs,
   comet streaks in the background, and a rotating gravity lens

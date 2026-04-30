@@ -1,9 +1,10 @@
 # mac-tui-procmon Wiki
 
-Terminal UI process monitor for macOS. Built around `libproc` and
-`sysctl` direct-call snapshots — no `fork()` per refresh, so it
-survives fork bombs and memory exhaustion that knock other monitors
-offline.
+Terminal UI process monitor for macOS: AI-assisted process forensics
+plus a crypto-bubble style PID galaxy inside a real Mac terminal.
+Built around `libproc` and `sysctl` direct-call snapshots — no
+`fork()` per refresh, so it survives fork bombs and memory
+exhaustion that knock other monitors offline.
 
 This tool is **process-monitoring only**. Host-wide security
 auditing (TCC sweeps, kernel/boot, persistence, browser extensions,
@@ -34,9 +35,10 @@ headless audit reports) lives in the sister project
   - Deep triage (`T`): adds osquery snapshot, injection /
     anti-debug evidence, structured cursor over findings.
 - Per-process network connection list with one-key kill (`k`).
-- Fullscreen Process Galaxy (`G`) with load-sized vendor bubbles,
-  fork rings, packet trails, comet streaks, and a gravity-lens
-  swirl around the dominant process.
+- Fullscreen Process Galaxy (`G`) with crypto-bubble style PID
+  cards, load-sized vendor bubbles, fork rings, packet trails,
+  comet streaks, and a gravity-lens swirl around the dominant
+  process.
 - Endpoint Security live event stream (exec, auth, login, TCC,
   XProtect) with a two-stage Esc that synthesizes an LLM summary
   before closing.
@@ -45,7 +47,8 @@ headless audit reports) lives in the sister project
 - Alert engine (cpu / mem / threads / fds / forks / net rate /
   bytes thresholds) with audible alert and a max-count guard rail.
 - AI chat overlay (`?`) that auto-captures the current screen as
-  grounded context.
+  grounded context, plus Claude / Codex / Gemini consensus during
+  Inspect.
 - Debug log overlay (`L`) viewable from anywhere.
 - TUI snapshot capture: every menu and screen writes a
   `*.screen.json` artifact when the capture dir is set, used for
