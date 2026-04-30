@@ -4008,6 +4008,15 @@ class ProcMonUI:
             self._capture_screen_snapshot("main", "Main view")
             return
 
+        # Fullscreen modes — galaxy takes over the entire screen rather
+        # than rendering inside the bottom detail pane. Header + shortcut
+        # bar still wrap it; everything in between is the galaxy canvas.
+        if self._galaxy_mode:
+            self._galaxy_render_fullscreen(w, h)
+            self._render_shortcut_bar(h, w)
+            self.stdscr.refresh()
+            return
+
         y = 0
 
         # ── Header ──
@@ -4374,14 +4383,11 @@ class ProcMonUI:
             sel_line = -1
         self._capture_detail_snapshot(detail_y, w, detail_title,
                                       detail_all_lines, scroll)
-        # Galaxy mode renders directly with full color / blink / glow
-        # support; skip the generic detail pane to avoid double-drawing.
-        if self._galaxy_mode:
-            self._galaxy_render_direct(detail_y, w)
-        else:
-            self._render_detail(detail_y, w, detail_all_lines,
-                                detail_title, scroll, self._detail_focus,
-                                sel_line)
+        # Galaxy short-circuits at the top of render() to take over the
+        # whole screen; we never reach this branch with _galaxy_mode set.
+        self._render_detail(detail_y, w, detail_all_lines,
+                            detail_title, scroll, self._detail_focus,
+                            sel_line)
 
         # ── Shortcut bar (mc-style) ──
         self._render_shortcut_bar(h, w)
@@ -5614,13 +5620,17 @@ class ProcMonUI:
         return "unknown"
 
     def _galaxy_step(self, w, h):
-        """Run one Fruchterman-Reingold-ish iteration of the spring solver.
+        """Pack bubbles in a row-fill grid (biggest first → top-left,
+        wrap to next row when the current one fills, vertical padding
+        between rows). Replaces the previous force-directed spring
+        solver: bubbles in a stable grid read like a crypto-bubble
+        dashboard rather than dancing in 2D space.
 
-        Updates `_galaxy_positions` and `_galaxy_velocity` in place. Marks
-        newly-spotted PIDs with a glow countdown.
+        Still tracks `_galaxy_glow` for newly-spotted PIDs and
+        evicts dropped ones, so the existing fork-glow effect carries
+        over. `_galaxy_velocity` is no longer used; left in place as
+        an empty dict for backward compatibility.
         """
-        import math
-        import random
         nodes = self._galaxy_select_nodes()
         node_pids = [r["pid"] for r in nodes]
         node_set = set(node_pids)
@@ -5628,7 +5638,7 @@ class ProcMonUI:
         for pid in node_pids:
             if pid not in self._galaxy_known_pids:
                 self._galaxy_glow[pid] = 6
-        # Decrement glow
+        # Decrement glow; evict PIDs that left the snapshot.
         for pid in list(self._galaxy_glow.keys()):
             if pid not in node_set:
                 self._galaxy_glow.pop(pid, None)
@@ -5642,91 +5652,52 @@ class ProcMonUI:
         for pid in list(self._galaxy_positions.keys()):
             if pid not in node_set:
                 self._galaxy_positions.pop(pid, None)
-                self._galaxy_velocity.pop(pid, None)
-        # Initialize positions for new nodes.
-        bound_w = max(10, w - 4)
-        bound_h = max(6, h - 6)
-        for pid in node_pids:
-            if pid not in self._galaxy_positions:
-                self._galaxy_positions[pid] = (
-                    random.uniform(2.0, bound_w - 2),
-                    random.uniform(2.0, bound_h - 2),
-                )
-                self._galaxy_velocity[pid] = (0.0, 0.0)
+        # Velocity dict is unused under grid-fill but kept around for
+        # the fixture / backward-compat tests.
+        self._galaxy_velocity = {}
+
+        # Canvas bounds. The fullscreen renderer passes the entire
+        # screen area minus header/shortcut; the legacy split-pane
+        # path passes a smaller `h`.
+        bound_w = max(20, w - 2)
+        bound_h = max(6, h - 2)
         if not node_pids:
             return
-        # Spring constants — make `k` proportional to the average bubble
-        # size so that heavy nodes get the room they need without
-        # overlapping their neighbours.
-        sizes = {r["pid"]: self._galaxy_bubble_size(r) for r in nodes}
-        avg_w = sum(s[0] for s in sizes.values()) / max(1, len(sizes))
-        avg_h = sum(s[1] for s in sizes.values()) / max(1, len(sizes))
-        avg_radius = max(2.0, (avg_w + avg_h) / 4.0)
-        area = bound_w * bound_h
-        k = max(avg_radius, math.sqrt(area / max(1, len(node_pids))))
-        # Repulsive forces between every pair, scaled so that a pair of
-        # large bubbles repels harder than a pair of small ones.
-        forces = {pid: [0.0, 0.0] for pid in node_pids}
-        for i, p in enumerate(node_pids):
-            px, py = self._galaxy_positions[p]
-            pw, ph = sizes[p]
-            pr = (pw + ph) / 4.0
-            for j in range(i + 1, len(node_pids)):
-                q = node_pids[j]
-                qx, qy = self._galaxy_positions[q]
-                qw, qh = sizes[q]
-                qr = (qw + qh) / 4.0
-                dx = px - qx
-                dy = py - qy
-                d2 = dx * dx + dy * dy + 0.01
-                d = math.sqrt(d2)
-                # Boost repulsion when the bubbles would overlap;
-                # scale repulsion by the sum of their radii.
-                pair_r = pr + qr
-                rep = (k * k) / d
-                if d < pair_r * 1.5:
-                    rep *= 2.5
-                fx = (dx / d) * rep
-                fy = (dy / d) * rep
-                forces[p][0] += fx
-                forces[p][1] += fy
-                forces[q][0] -= fx
-                forces[q][1] -= fy
-        # Attractive forces along edges (parent → child).
-        for r in nodes:
-            ppid = r.get("ppid", 0)
-            pid = r["pid"]
-            if ppid in node_set and ppid != pid:
-                p1x, p1y = self._galaxy_positions[ppid]
-                p2x, p2y = self._galaxy_positions[pid]
-                dx = p2x - p1x
-                dy = p2y - p1y
-                d = math.sqrt(dx * dx + dy * dy + 0.01)
-                attr = (d * d) / k
-                fx = (dx / d) * attr
-                fy = (dy / d) * attr
-                forces[pid][0] -= fx
-                forces[pid][1] -= fy
-                forces[ppid][0] += fx
-                forces[ppid][1] += fy
-        # Apply forces with damping; clamp to bounds.
-        damp = 0.85
-        for pid in node_pids:
-            fx, fy = forces[pid]
-            vx, vy = self._galaxy_velocity[pid]
-            vx = (vx + fx * 0.01) * damp
-            vy = (vy + fy * 0.01) * damp
-            # Limit displacement per step.
-            mag = math.sqrt(vx * vx + vy * vy)
-            limit = 1.5
-            if mag > limit:
-                vx = vx / mag * limit
-                vy = vy / mag * limit
-            x, y = self._galaxy_positions[pid]
-            x = max(1.0, min(bound_w - 1, x + vx))
-            y = max(1.0, min(bound_h - 1, y + vy))
-            self._galaxy_positions[pid] = (x, y)
-            self._galaxy_velocity[pid] = (vx, vy)
+
+        # Sort by combined load score descending so heaviest bubble
+        # lands top-left. (Mirrors the `_score` helper inside
+        # `_galaxy_select_nodes`; we recompute here to keep the row
+        # order consistent with bubble size.)
+        total_mem = max(1, self._total_mem_kb)
+        def _sort_score(r):
+            cpu = r.get("agg_cpu", r.get("cpu", 0)) or 0
+            rss = r.get("agg_rss_kb", r.get("rss_kb", 0)) or 0
+            return cpu + (rss / total_mem) * 100.0
+        ordered = sorted(nodes, key=_sort_score, reverse=True)
+
+        # Row-fill packing: place each bubble at the next free slot.
+        # When the next bubble would overflow the row, wrap to the
+        # next line at x=0 and advance y by the row's max bubble
+        # height + vertical padding.
+        H_PAD = 1
+        V_PAD = 1
+        x = 0
+        y = 0
+        row_h = 0
+        for r in ordered:
+            bw, bh = self._galaxy_bubble_size(r)
+            if x > 0 and x + bw > bound_w:
+                x = 0
+                y += row_h + V_PAD
+                row_h = 0
+            # Position is the bubble's center (the renderer subtracts
+            # bw/2 / bh/2 to get the top-left corner). +0.5 is a tiny
+            # nudge to avoid x-1//2 floor flicker on edges.
+            self._galaxy_positions[r["pid"]] = (x + bw / 2.0,
+                                                  y + bh / 2.0)
+            x += bw + H_PAD
+            if bh > row_h:
+                row_h = bh
 
     def _galaxy_render_bubble(self, row, bw, bh):
         """Render a single bubble as a list of `bh` strings of width `bw`.
@@ -5804,6 +5775,140 @@ class ProcMonUI:
         3:  6,   # busy: orange
         4:  5,   # heavy: red
     }
+
+    def _galaxy_render_fullscreen(self, w, h):
+        """Render the galaxy as the entire screen (header + bubble grid +
+        shortcut bar). Bypasses the split-view layout so heavy bubbles
+        get all the room they need.
+
+        The header at row 0 carries the title + cull count + a hint
+        about how to exit (`G` toggles, `Esc` closes). Rows 1 → h-2 are
+        the bubble canvas. The caller is responsible for rendering the
+        shortcut bar at row h-1.
+        """
+        # Header row
+        nodes = self._galaxy_select_nodes()
+        hidden = getattr(self, "_galaxy_hidden_count", 0)
+        title = (f" Process Galaxy — {len(nodes)} bubbles"
+                 + (f"  (+{hidden} idle hidden)" if hidden else "")
+                 + "  · sized by load · grouped by vendor color")
+        try:
+            self._put(0, 0, " " * w, curses.color_pair(2) | curses.A_BOLD)
+            self._put(0, 0, title[:w], curses.color_pair(2) | curses.A_BOLD)
+            hint = " G/Esc to close "
+            if w > len(hint) + len(title) + 4:
+                self._put(0, w - len(hint),
+                          hint, curses.color_pair(2) | curses.A_BOLD)
+        except curses.error:
+            pass
+
+        # Body bounds — rows 1 .. h-2 inclusive.
+        body_top = 1
+        body_h = max(6, h - 2 - body_top + 1)
+        body_w = w
+        if w < 30 or body_h < 6:
+            try:
+                self._put(body_top, 0,
+                          " Galaxy view needs a larger window".ljust(w),
+                          curses.color_pair(10))
+            except curses.error:
+                pass
+            return
+
+        # Lay out the grid for this canvas size.
+        self._galaxy_step(body_w, body_h)
+
+        # Cell grid: (char, color_pair_id, extra_attrs).
+        EMPTY = (" ", 0, 0)
+        grid = [[EMPTY for _ in range(body_w)] for _ in range(body_h)]
+
+        # Bubbles. In grid-fill mode we don't draw parent-child edges
+        # (they'd cross other bubbles awkwardly and detract from the
+        # crypto-bubble look). Edges live in the legacy split-view path.
+        sized = []
+        for r in nodes:
+            bw, bh = self._galaxy_bubble_size(r)
+            sized.append((bw * bh, r, bw, bh))
+        # Smallest first so heavy ones overdraw.
+        sized.sort(key=lambda t: t[0])
+        total_mem = max(1, self._total_mem_kb)
+        for _area, r, bw, bh in sized:
+            pid = r["pid"]
+            pos = self._galaxy_positions.get(pid)
+            if pos is None:
+                continue
+            x, y = pos
+            x0 = int(x) - bw // 2
+            y0 = int(y) - bh // 2
+            # In grid-fill mode the layout is already row-aligned; just
+            # clamp to canvas bounds in case of a tight overflow.
+            x0 = max(0, min(body_w - bw, x0))
+            y0 = max(0, min(body_h - bh, y0))
+            tier = self._galaxy_load_tier(r, total_mem)
+            vendor = self._galaxy_vendor_label(r)
+            fill_pair = self._GALAXY_VENDOR_COLORS.get(
+                vendor, self._GALAXY_TIER_COLORS[tier])
+            border_pair = self._GALAXY_TIER_COLORS[tier]
+            border_extra = curses.A_BOLD if tier >= 3 else 0
+            inner_extra = curses.A_REVERSE
+            if tier >= 4:
+                inner_extra |= curses.A_BOLD
+            glow = bool(self._galaxy_glow.get(pid))
+            if glow:
+                border_pair = 3
+                border_extra |= curses.A_BOLD | curses.A_BLINK
+            cpu_val = r.get("agg_cpu", r.get("cpu", 0)) or 0
+            anomaly = cpu_val >= 80.0
+            lines = self._galaxy_render_bubble(r, bw, bh)
+            for dy, line in enumerate(lines):
+                row_y = y0 + dy
+                if not (0 <= row_y < body_h):
+                    continue
+                is_top_or_bot = (dy == 0 or dy == bh - 1)
+                for dx, ch in enumerate(line):
+                    col_x = x0 + dx
+                    if not (0 <= col_x < body_w):
+                        continue
+                    is_side = (dx == 0 or dx == bw - 1) and not is_top_or_bot
+                    if is_top_or_bot or is_side:
+                        grid[row_y][col_x] = (ch, border_pair, border_extra)
+                    else:
+                        attr_extra = inner_extra
+                        if anomaly:
+                            attr_extra |= curses.A_BLINK
+                        grid[row_y][col_x] = (ch, fill_pair, attr_extra)
+
+        # Paint the grid into curses, coalescing adjacent same-attr runs.
+        for row_y, row in enumerate(grid):
+            screen_y = body_top + row_y
+            if screen_y >= h - 1:
+                break
+            x_pos = 0
+            run_start = None
+            run_attr = None
+            run_chars = []
+            for col_x, (ch, pair, extra) in enumerate(row):
+                attr = (curses.color_pair(pair) | extra) if pair else extra
+                if run_attr is None or attr == run_attr:
+                    if run_start is None:
+                        run_start = col_x
+                    run_chars.append(ch)
+                    run_attr = attr
+                else:
+                    try:
+                        self._put(screen_y, run_start,
+                                  "".join(run_chars), run_attr)
+                    except curses.error:
+                        pass
+                    run_start = col_x
+                    run_chars = [ch]
+                    run_attr = attr
+            if run_start is not None and run_chars:
+                try:
+                    self._put(screen_y, run_start,
+                              "".join(run_chars), run_attr)
+                except curses.error:
+                    pass
 
     def _galaxy_render_direct(self, start_y, w):
         """Render the galaxy view directly into curses with full color

@@ -671,24 +671,142 @@ class TestProcessGalaxy:
         """Static guard against a method-name typo in the render
         dispatcher. The original bug shipped because the dispatcher
         called `_render_galaxy_direct` while the method on the class
-        was actually named `_galaxy_render_direct` — every unit test
-        still passed (they exercised `_build_galaxy_lines`), but the
-        live app crashed with AttributeError as soon as the user
-        pressed `G`. This test reads the source and asserts the
-        dispatcher invokes the right name."""
+        was actually named `_galaxy_render_direct`. Now that galaxy
+        is fullscreen, the canonical entry point is
+        `_galaxy_render_fullscreen` — assert THAT name is what render()
+        invokes, and the historic typo is still nowhere in the file.
+        """
         import pathlib
-        src = pathlib.Path(procmon.__file__).read_text(encoding="utf-8")
         impl_path = pathlib.Path(procmon.__file__).parent / \
             "mac_tui_procmon_impl.py"
         impl_src = impl_path.read_text(encoding="utf-8")
-        # The galaxy-mode branch in render() must reference the
-        # canonical method name. If someone renames the method again,
-        # whichever side is out-of-sync will fail this test.
-        assert "self._galaxy_render_direct(" in impl_src, \
-            "render() dispatch must call self._galaxy_render_direct(...)"
-        # And the inverse: the typo'd name must not appear anywhere.
+        assert "self._galaxy_render_fullscreen(" in impl_src, \
+            "render() dispatch must call self._galaxy_render_fullscreen(...)"
         assert "_render_galaxy_direct" not in impl_src, \
             "found typo'd method name '_render_galaxy_direct' in source"
+        assert "_render_galaxy_fullscreen" not in impl_src, \
+            "found typo'd method name '_render_galaxy_fullscreen' in source"
+
+    def test_galaxy_render_fullscreen_does_not_raise(self, monitor):
+        """Smoke test for the live fullscreen render path."""
+        from unittest.mock import patch
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        monitor._galaxy_mode = True
+        monitor.rows = self._make_rows(8)
+        monitor.rows[0]["agg_cpu"] = 50.0
+        monitor.rows[0]["agg_rss_kb"] = 2 * 1024 * 1024
+        monitor.rows[0]["command"] = (
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+        monitor.stdscr.getmaxyx.return_value = (40, 120)
+
+        assert hasattr(monitor, "_galaxy_render_fullscreen"), \
+            "_galaxy_render_fullscreen must exist on ProcMonUI"
+
+        with patch("curses.color_pair", side_effect=lambda n: n << 8), \
+             patch("curses.curs_set"), \
+             patch.object(monitor, "_put"):
+            monitor._galaxy_render_fullscreen(120, 40)
+
+    def test_galaxy_grid_layout_no_overlap_in_row(self, monitor):
+        """Row-fill grid: bubbles in the same row never overlap on
+        the X axis. Heaviest bubble lands first (smaller x); subsequent
+        bubbles are placed at x positions that account for their
+        predecessor's full width."""
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        # Three active processes that should all fit in one row of a
+        # 120-wide canvas.
+        monitor.rows = [
+            {"pid": 1, "ppid": 0, "agg_cpu": 40.0, "cpu": 40.0,
+             "agg_rss_kb": 100, "rss_kb": 100,
+             "command": "/Applications/A.app/Contents/MacOS/A"},
+            {"pid": 2, "ppid": 0, "agg_cpu": 15.0, "cpu": 15.0,
+             "agg_rss_kb": 100, "rss_kb": 100,
+             "command": "/Applications/B.app/Contents/MacOS/B"},
+            {"pid": 3, "ppid": 0, "agg_cpu": 5.0, "cpu": 5.0,
+             "agg_rss_kb": 100, "rss_kb": 100,
+             "command": "/Applications/C.app/Contents/MacOS/C"},
+        ]
+        monitor._galaxy_step(120, 30)
+        # Sort by center-x so we can check pairwise non-overlap.
+        rects = []
+        for r in monitor.rows:
+            cx, cy = monitor._galaxy_positions[r["pid"]]
+            bw, bh = monitor._galaxy_bubble_size(r)
+            rects.append((cx - bw / 2.0, cy - bh / 2.0,
+                          cx + bw / 2.0, cy + bh / 2.0, r["pid"]))
+        rects.sort(key=lambda t: t[0])
+        for i in range(len(rects) - 1):
+            assert rects[i][2] <= rects[i + 1][0] + 0.001, \
+                f"bubbles {rects[i][4]} and {rects[i + 1][4]} overlap"
+
+    def test_galaxy_grid_wraps_to_new_row_when_full(self, monitor):
+        """When the next bubble doesn't fit in the current row, the
+        layout wraps it to the next row. Verify by packing many heavy
+        bubbles into a narrow canvas and asserting that at least two
+        distinct y-coordinates are produced."""
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        # 10 heavy bubbles, each 17×5; they can't all fit in 80 cols.
+        monitor.rows = [
+            {"pid": i + 1, "ppid": 0, "agg_cpu": 50.0, "cpu": 50.0,
+             "agg_rss_kb": 100, "rss_kb": 100,
+             "command": f"/Applications/App{i}.app/Contents/MacOS/App{i}"}
+            for i in range(10)
+        ]
+        monitor._galaxy_step(80, 40)
+        ys = {round(monitor._galaxy_positions[r["pid"]][1])
+              for r in monitor.rows}
+        assert len(ys) >= 2, \
+            "expected wrap to a new row when canvas runs out of width"
+
+    def test_galaxy_grid_heaviest_lands_top_left(self, monitor):
+        """The bubble with the highest combined load is positioned
+        first (smallest x and y). Heaviest top-left is the canonical
+        crypto-bubble visual hierarchy."""
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        monitor.rows = [
+            {"pid": 1, "ppid": 0, "agg_cpu": 5.0, "cpu": 5.0,
+             "agg_rss_kb": 100, "rss_kb": 100,
+             "command": "/Applications/Light.app/Contents/MacOS/Light"},
+            {"pid": 2, "ppid": 0, "agg_cpu": 50.0, "cpu": 50.0,
+             "agg_rss_kb": 100, "rss_kb": 100,
+             "command": "/Applications/Heavy.app/Contents/MacOS/Heavy"},
+            {"pid": 3, "ppid": 0, "agg_cpu": 25.0, "cpu": 25.0,
+             "agg_rss_kb": 100, "rss_kb": 100,
+             "command": "/Applications/Mid.app/Contents/MacOS/Mid"},
+        ]
+        monitor._galaxy_step(120, 30)
+        heavy_x = monitor._galaxy_positions[2][0]
+        mid_x = monitor._galaxy_positions[3][0]
+        light_x = monitor._galaxy_positions[1][0]
+        # Heaviest is to the left of the others (smaller x in row-fill).
+        assert heavy_x < mid_x < light_x, \
+            f"heaviest should be top-left, got x positions: " \
+            f"heavy={heavy_x}, mid={mid_x}, light={light_x}"
+
+    def test_main_render_takes_full_screen_in_galaxy_mode(self):
+        """Static check on render() — when _galaxy_mode is true, the
+        function calls _galaxy_render_fullscreen with (w, h) (the FULL
+        screen) and skips the rest of the layout. We assert this in the
+        source so the dispatch can't silently regress to the split-view
+        path."""
+        import pathlib
+        impl_path = pathlib.Path(procmon.__file__).parent / \
+            "mac_tui_procmon_impl.py"
+        impl_src = impl_path.read_text(encoding="utf-8")
+        # Find the render() definition and look for the early-return
+        # galaxy block.
+        marker = "if self._galaxy_mode:"
+        idx = impl_src.find("def render(self):")
+        assert idx >= 0, "render() not found in impl source"
+        body = impl_src[idx: idx + 4000]
+        assert marker in body, \
+            "render() must early-branch on self._galaxy_mode"
+        # The early branch invokes the fullscreen renderer.
+        galaxy_branch = body[body.find(marker):]
+        assert "_galaxy_render_fullscreen" in galaxy_branch[:600], \
+            "render()'s _galaxy_mode branch must call _galaxy_render_fullscreen"
+        assert "return" in galaxy_branch[:600], \
+            "render()'s _galaxy_mode branch must early-return"
 
     def test_select_nodes_keeps_active_subtree_chain(self, monitor):
         """A direct parent of an interesting PID is kept even when its
