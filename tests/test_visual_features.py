@@ -1244,6 +1244,63 @@ class TestProcessGalaxy:
             monitor._galaxy_render_fullscreen(60, 20)
         # Should not raise; the totals strip may or may not show.
 
+    # ── Feature 10: Bottom vendor legend ────────────────────────────
+
+    def test_vendor_legend_lists_present_vendors(self, monitor):
+        from unittest.mock import patch
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        monitor._galaxy_mode = True
+        monitor.rows = [
+            {"pid": 1, "ppid": 0,
+             "command": "/Applications/Google Chrome.app/Contents/MacOS/"
+                        "Google Chrome",
+             "cpu": 50.0, "agg_cpu": 50.0,
+             "rss_kb": 1024, "agg_rss_kb": 1024},
+            {"pid": 2, "ppid": 0,
+             "command": "/Applications/Slack.app/Contents/MacOS/Slack",
+             "cpu": 30.0, "agg_cpu": 30.0,
+             "rss_kb": 1024, "agg_rss_kb": 1024},
+            {"pid": 3, "ppid": 0,
+             "command": "/usr/bin/zsh",
+             "cpu": 5.0, "agg_cpu": 5.0,
+             "rss_kb": 1024, "agg_rss_kb": 1024},
+        ]
+        captured = []
+        def fake_put(y, x, text, attr=0):
+            captured.append((y, x, text, attr))
+        with patch("curses.color_pair", side_effect=lambda n: n << 8), \
+             patch.object(monitor, "_put", side_effect=fake_put):
+            monitor._galaxy_render_fullscreen(180, 40)
+        # Legend row is h-2 = 38.
+        legend_text = "".join(t for y, _, t, _ in captured if y == 38)
+        # Each present vendor (apple, google, slack) appears in legend.
+        assert "Google" in legend_text
+        assert "Slack" in legend_text
+        assert "Apple" in legend_text
+        # ■ glyph should appear as a color marker.
+        assert "■" in legend_text
+
+    def test_vendor_legend_only_shows_present_vendors(self, monitor):
+        from unittest.mock import patch
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        monitor._galaxy_mode = True
+        # Just an apple binary: no slack or google in legend.
+        monitor.rows = [
+            {"pid": 1, "ppid": 0, "command": "/usr/bin/zsh",
+             "cpu": 5.0, "agg_cpu": 5.0,
+             "rss_kb": 1024, "agg_rss_kb": 1024},
+        ]
+        captured = []
+        def fake_put(y, x, text, attr=0):
+            captured.append((y, x, text, attr))
+        with patch("curses.color_pair", side_effect=lambda n: n << 8), \
+             patch.object(monitor, "_put", side_effect=fake_put):
+            monitor._galaxy_render_fullscreen(180, 40)
+        legend_text = "".join(t for y, _, t, _ in captured if y == 38)
+        assert "Apple" in legend_text
+        assert "Google" not in legend_text
+        assert "Slack" not in legend_text
+
     def test_aspect_correction_uses_doubled_min_dy(self):
         """Static check: the overlap solver's required vertical
         separation is doubled to compensate for ~2:1 terminal cells."""

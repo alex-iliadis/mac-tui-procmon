@@ -6018,9 +6018,10 @@ class ProcMonUI:
         except curses.error:
             pass
 
-        # Body bounds — rows 1 .. h-2 inclusive.
+        # Body bounds — rows 1 .. h-3 inclusive (h-2 is the vendor
+        # legend row, h-1 is the global shortcut bar).
         body_top = 1
-        body_h = max(6, h - 2 - body_top + 1)
+        body_h = max(6, h - 3 - body_top + 1)
         body_w = w
         if w < 30 or body_h < 6:
             try:
@@ -6201,6 +6202,37 @@ class ProcMonUI:
                               "".join(run_chars), run_attr)
                 except curses.error:
                     pass
+
+        # Vendor legend: list every vendor present in the current
+        # cluster as a colored ■ + name. Rendered on the canvas row
+        # just above the shortcut bar so it doesn't overlap bubbles.
+        legend_y = h - 2
+        if legend_y > body_top:
+            present = []
+            seen = set()
+            for r in nodes:
+                v = self._galaxy_vendor_label(r)
+                if v in seen:
+                    continue
+                seen.add(v)
+                present.append(v)
+            try:
+                self._put(legend_y, 0, " " * w, 0)
+                cursor = 1
+                for v in present:
+                    label = v.title()
+                    pair = self._GALAXY_VENDOR_COLORS.get(v, 10)
+                    seg_glyph = "■ "
+                    seg_total = len(seg_glyph) + len(label) + 2
+                    if cursor + seg_total > w - 1:
+                        break
+                    self._put(legend_y, cursor, seg_glyph,
+                              curses.color_pair(pair) | curses.A_BOLD)
+                    self._put(legend_y, cursor + len(seg_glyph),
+                              label, curses.color_pair(10))
+                    cursor += seg_total
+            except curses.error:
+                pass
 
     def _galaxy_render_direct(self, start_y, w):
         """Render the galaxy view directly into curses with full color
