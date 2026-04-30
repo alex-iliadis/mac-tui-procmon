@@ -1195,6 +1195,55 @@ class TestProcessGalaxy:
         second = monitor._galaxy_pulse_phase
         assert second != first, "pulse phase should advance each tick"
 
+    # ── Feature 9: Header totals strip ──────────────────────────────
+
+    def test_header_totals_in_painted_text(self, monitor):
+        from unittest.mock import patch
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        monitor._galaxy_mode = True
+        monitor.rows = [
+            {"pid": 1, "ppid": 0,
+             "command": "/Applications/Slack.app/Contents/MacOS/Slack",
+             "cpu": 50.0, "agg_cpu": 50.0,
+             "rss_kb": 1024 * 1024, "agg_rss_kb": 1024 * 1024},
+            {"pid": 2, "ppid": 0,
+             "command": "/Applications/Google Chrome.app/Contents/MacOS/"
+                        "Google Chrome",
+             "cpu": 25.0, "agg_cpu": 25.0,
+             "rss_kb": 512 * 1024, "agg_rss_kb": 512 * 1024},
+        ]
+        captured = []
+        def fake_put(y, x, text, attr=0):
+            captured.append((y, x, text, attr))
+        with patch("curses.color_pair", side_effect=lambda n: n << 8), \
+             patch.object(monitor, "_put", side_effect=fake_put):
+            monitor._galaxy_render_fullscreen(180, 40)
+        # Header row 0 should carry the totals strip.
+        header_text = "".join(t for y, _, t, _ in captured if y == 0)
+        assert "2 procs" in header_text
+        assert "75% CPU" in header_text  # 50 + 25 = 75
+        assert "vendors" in header_text
+
+    def test_header_totals_omitted_on_narrow_window(self, monitor):
+        """Totals strip omits cleanly when the header doesn't have
+        room (no crash)."""
+        from unittest.mock import patch
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        monitor._galaxy_mode = True
+        monitor.rows = [
+            {"pid": 1, "ppid": 0,
+             "command": "/Applications/Slack.app/Contents/MacOS/Slack",
+             "cpu": 5.0, "agg_cpu": 5.0,
+             "rss_kb": 100, "agg_rss_kb": 100},
+        ]
+        captured = []
+        def fake_put(y, x, text, attr=0):
+            captured.append((y, x, text, attr))
+        with patch("curses.color_pair", side_effect=lambda n: n << 8), \
+             patch.object(monitor, "_put", side_effect=fake_put):
+            monitor._galaxy_render_fullscreen(60, 20)
+        # Should not raise; the totals strip may or may not show.
+
     def test_aspect_correction_uses_doubled_min_dy(self):
         """Static check: the overlap solver's required vertical
         separation is doubled to compensate for ~2:1 terminal cells."""

@@ -5986,10 +5986,32 @@ class ProcMonUI:
         title = (f" Process Galaxy — {len(nodes)} bubbles"
                  + (f"  (+{hidden} idle hidden)" if hidden else "")
                  + "  · sized by load · grouped by vendor color")
+
+        # Totals strip computed from the current visible cluster.
+        total_cpu = sum(
+            (r.get("agg_cpu", r.get("cpu", 0)) or 0) for r in nodes)
+        total_rss_kb = sum(
+            (r.get("agg_rss_kb", r.get("rss_kb", 0)) or 0) for r in nodes)
+        if total_rss_kb >= 1024 * 1024:
+            rss_label = f"{total_rss_kb / (1024 * 1024):.1f}G"
+        elif total_rss_kb >= 1024:
+            rss_label = f"{total_rss_kb / 1024:.0f}M"
+        else:
+            rss_label = f"{total_rss_kb}K"
+        vendor_count = len({self._galaxy_vendor_label(r) for r in nodes})
+        totals = (f" · {len(nodes)} procs · {total_cpu:.0f}% CPU"
+                  f" · {rss_label} RSS · {vendor_count} vendors ")
+
         try:
             self._put(0, 0, " " * w, curses.color_pair(2) | curses.A_BOLD)
             self._put(0, 0, title[:w], curses.color_pair(2) | curses.A_BOLD)
             hint = " G/Esc to close "
+            # Place totals to the right of the title (left-aligned),
+            # but only if there's room for both totals + hint.
+            totals_x = len(title) + 1
+            if w - len(hint) - totals_x >= len(totals):
+                self._put(0, totals_x, totals,
+                          curses.color_pair(2) | curses.A_BOLD)
             if w > len(hint) + len(title) + 4:
                 self._put(0, w - len(hint),
                           hint, curses.color_pair(2) | curses.A_BOLD)
