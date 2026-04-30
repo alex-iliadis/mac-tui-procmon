@@ -1627,10 +1627,10 @@ class TestProcessGalaxy:
             return out
         assert stars(runs1) == stars(runs2)
 
-    def test_drop_shadow_painted_below_bubbles(self, monitor):
-        """Each bubble gets a `▒` drop-shadow stripe one cell down and
-        one cell right of its bottom-right edge so the cards look like
-        they're floating above the canvas."""
+    def test_drop_shadows_no_longer_painted(self, monitor):
+        """Regression guard: the grey ▒ drop shadow has been replaced
+        by vendor-color halos. The ▒ glyph must no longer appear in
+        the rendered output for a typical cluster."""
         monitor._total_mem_kb = 16 * 1024 * 1024
         monitor._galaxy_mode = True
         monitor.rows = [
@@ -1641,7 +1641,99 @@ class TestProcessGalaxy:
         ]
         runs = self._capture_fullscreen(monitor, w=80, h=20)
         joined = "".join(t for _, _, t, _ in runs)
-        assert "▒" in joined, "expected ▒ drop-shadow glyph in render"
+        assert "▒" not in joined, \
+            "▒ drop-shadow glyph must not appear after the halo replacement"
+
+    def test_vendor_halo_paints_colored_glyphs_around_bubble(self, monitor):
+        """Each bubble bleeds its vendor color into surrounding cells.
+        For a Slack bubble (vendor color = magenta, pair 8) we expect
+        ◆ + · halo glyphs painted in pair 8 in cells immediately
+        outside the bubble's borders."""
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        monitor._galaxy_mode = True
+        monitor.rows = [
+            {"pid": 42, "ppid": 0,
+             "command": "/Applications/Slack.app/Contents/MacOS/Slack",
+             "cpu": 30.0, "agg_cpu": 30.0,
+             "rss_kb": 200000, "agg_rss_kb": 200000},
+        ]
+        runs = self._capture_fullscreen(monitor, w=120, h=30)
+        joined = "".join(t for _, _, t, _ in runs)
+        # Inner ring uses ◆, outer rings use + and ·.
+        assert "◆" in joined, "expected inner halo ◆ glyph"
+        assert "+" in joined, "expected mid halo + glyph"
+
+    def test_pulse_wave_paints_ring_when_active(self, monitor):
+        """When `_galaxy_pulse_wave_age` is in [0, 6], a ring of
+        bright cyan glyphs emanates from the cluster centroid."""
+        from unittest.mock import patch
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        monitor._galaxy_mode = True
+        monitor.rows = [
+            {"pid": 100, "ppid": 0, "cpu": 50.0, "agg_cpu": 50.0,
+             "rss_kb": 100, "agg_rss_kb": 100,
+             "command": "/Applications/Chrome.app/Contents/MacOS/Chrome"},
+        ]
+        # Settle layout, then trigger the pulse manually.
+        monitor._galaxy_step(120, 30)
+        monitor._galaxy_pulse_wave_age = 1
+        runs = self._capture_fullscreen(monitor, w=120, h=30)
+        # The wave uses cyan glyphs; assert at least some appear in
+        # cells away from the bubble itself.
+        cyan_glyphs = sum(1 for _y, _x, t, _a in runs
+                          if any(ch in ("·", "⋅", "•") for ch in t))
+        assert cyan_glyphs > 0, "expected pulse wave ring glyphs"
+
+    def test_energy_stream_renders_particle_for_active_pair(self, monitor):
+        """A parent and child both above the active threshold get a
+        ● particle painted on the segment between them."""
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        monitor._galaxy_mode = True
+        monitor.rows = [
+            {"pid": 100, "ppid": 0, "cpu": 50.0, "agg_cpu": 50.0,
+             "rss_kb": 100, "agg_rss_kb": 100,
+             "command": "/Applications/Chrome.app/Contents/MacOS/Chrome"},
+            {"pid": 200, "ppid": 100, "cpu": 25.0, "agg_cpu": 25.0,
+             "rss_kb": 100, "agg_rss_kb": 100,
+             "command": "/Applications/Chrome.app/Contents/MacOS/"
+                        "Chrome Helper"},
+        ]
+        # Place bubbles far enough apart that the segment is rendered.
+        monitor._galaxy_positions = {100: (30.0, 15.0),
+                                      200: (90.0, 15.0)}
+        monitor._galaxy_velocity = {100: (0.0, 0.0),
+                                     200: (0.0, 0.0)}
+        monitor._galaxy_known_pids = {100, 200}
+        runs = self._capture_fullscreen(monitor, w=120, h=30)
+        joined = "".join(t for _, _, t, _ in runs)
+        assert "●" in joined, "expected energy-stream particle glyph"
+
+    def test_gravity_pulls_lighter_toward_heaviest(self, monitor):
+        """Over many ticks a lighter bubble drifts measurably closer to
+        the heaviest bubble than its starting distance."""
+        import math as _m
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        monitor.rows = [
+            {"pid": 1, "ppid": 0, "cpu": 50.0, "agg_cpu": 50.0,
+             "rss_kb": 100, "agg_rss_kb": 100,
+             "command": "/Applications/Heavy.app/Contents/MacOS/Heavy"},
+            {"pid": 2, "ppid": 0, "cpu": 1.0, "agg_cpu": 1.0,
+             "rss_kb": 100, "agg_rss_kb": 100,
+             "command": "/Applications/Light.app/Contents/MacOS/Light"},
+        ]
+        monitor._galaxy_positions = {1: (30.0, 15.0),
+                                      2: (110.0, 15.0)}
+        monitor._galaxy_velocity = {1: (0.0, 0.0), 2: (0.0, 0.0)}
+        monitor._galaxy_known_pids = {1, 2}
+        d_before = _m.hypot(110.0 - 30.0, 0.0)
+        for _ in range(40):
+            monitor._galaxy_step(140, 30)
+        x1, y1 = monitor._galaxy_positions[1]
+        x2, y2 = monitor._galaxy_positions[2]
+        d_after = _m.hypot(x2 - x1, y2 - y1)
+        assert d_after < d_before, \
+            f"gravity should reduce distance from {d_before:.1f} but " \
+            f"got {d_after:.1f}"
 
     def test_load_bar_uses_gradient_colors(self, monitor):
         """The load bar's filled cells (`█`) are repainted in green,

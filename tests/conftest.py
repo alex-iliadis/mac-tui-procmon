@@ -237,6 +237,8 @@ def monitor():
     mon._galaxy_trails = _galaxy_c.deque(maxlen=3)
     mon._galaxy_pulse_phase = 0
     mon._galaxy_bob_phase = 0
+    mon._galaxy_pulse_wave_age = -1
+    mon._galaxy_stream_phase = 0
     mon._galaxy_selected_pid = None
     mon._galaxy_known_pids = set()
     mon._galaxy_node_cap = 80

@@ -3306,6 +3306,18 @@ class ProcMonUI:
         # (3,4,5) drops the bold so the bubble pulses on a 3-frame
         # heartbeat.
         self._galaxy_pulse_phase = 0
+        # Bob phase for the sine-wave float, plus the system-pulse
+        # wave state. The wave radiates from the cluster's centroid
+        # every PULSE_PERIOD ticks and lasts ~6 frames before fading.
+        # `_galaxy_pulse_wave_age` is -1 while no wave is active, and
+        # 0..PULSE_MAX_AGE while it expands. The wave's centre and
+        # max radius are computed at render time.
+        self._galaxy_bob_phase = 0
+        self._galaxy_pulse_wave_age = -1
+        # Living-galaxy effects 4: stable streams of `●` particles that
+        # flow between active parent-child pairs. Each pair gets one
+        # particle whose position along the segment advances each tick.
+        self._galaxy_stream_phase = 0
         # Selection state for the focused bubble. None means "no
         # selection yet" (the renderer auto-picks the heaviest bubble
         # on first entry); arrow keys navigate to neighbours, Enter
@@ -5693,6 +5705,22 @@ class ProcMonUI:
         # at 1000 to keep ints bounded.
         self._galaxy_bob_phase = (
             getattr(self, "_galaxy_bob_phase", 0) + 1) % 1000
+        # Stream phase advances slower so particle flow looks fluid
+        # rather than jittery. One step per ~3 ticks.
+        self._galaxy_stream_phase = (
+            getattr(self, "_galaxy_stream_phase", 0) + 1) % 10000
+        # Trigger the system pulse wave every PULSE_PERIOD ticks. The
+        # wave then expands for PULSE_MAX_AGE frames before fading.
+        PULSE_PERIOD = 80
+        PULSE_MAX_AGE = 6
+        cur_age = getattr(self, "_galaxy_pulse_wave_age", -1)
+        if cur_age >= 0:
+            cur_age += 1
+            if cur_age > PULSE_MAX_AGE:
+                cur_age = -1
+            self._galaxy_pulse_wave_age = cur_age
+        if self._galaxy_bob_phase % PULSE_PERIOD == 0:
+            self._galaxy_pulse_wave_age = 0
         # Heat trail snapshot: capture the positions AT THIS POINT
         # (i.e. the result of the previous tick) so the renderer can
         # draw a fading trail behind each moving bubble. The deque is
@@ -5916,6 +5944,48 @@ class ProcMonUI:
                 qy = max(qh / 2.0, min(bound_h - qh / 2.0, qy))
                 self._galaxy_positions[p] = (px, py)
                 self._galaxy_positions[q] = (qx, qy)
+
+        # 4) Gravity vortex. The heaviest bubble is the cluster's
+        # "black hole" — every other bubble experiences a small
+        # constant pull toward it, scaled by inverse distance so the
+        # close-by ones swing tighter and the far ones drift in
+        # gradually. Combined with overlap-resolution and vendor
+        # attraction, the cluster orbits the dominant process.
+        if len(node_pids) >= 2:
+            total_mem = max(1, self._total_mem_kb)
+            def _grav_score(pid):
+                r = next((row for row in nodes
+                          if row["pid"] == pid), None)
+                if r is None:
+                    return 0.0
+                cpu = r.get("agg_cpu", r.get("cpu", 0)) or 0
+                rss = r.get("agg_rss_kb", r.get("rss_kb", 0)) or 0
+                return cpu + (rss / total_mem) * 100.0
+            heaviest_pid = max(node_pids, key=_grav_score)
+            hx, hy = self._galaxy_positions[heaviest_pid]
+            grav_strength = 0.04
+            grav_min_dist = 4.0
+            for pid in node_pids:
+                if pid == heaviest_pid:
+                    continue
+                bw_q, bh_q = sizes[pid]
+                qx, qy = self._galaxy_positions[pid]
+                dx = hx - qx
+                dy = hy - qy
+                dist = max(0.5, math.hypot(dx, dy))
+                if dist <= grav_min_dist:
+                    continue
+                # Inverse-distance falloff: pulled stronger when
+                # closer, but capped at grav_strength so distant
+                # bubbles still drift in measurably.
+                pull = grav_strength * min(1.0, 6.0 / dist)
+                ux = dx / dist
+                uy = dy / dist
+                qx += ux * pull
+                qy += uy * pull
+                qx = max(bw_q / 2.0, min(bound_w - bw_q / 2.0, qx))
+                qy = max(bh_q / 2.0, min(bound_h - bh_q / 2.0, qy))
+                self._galaxy_positions[pid] = (qx, qy)
 
     def _galaxy_render_bubble(self, row, bw, bh):
         """Render a single bubble as a list of `bh` strings of width `bw`.
@@ -6324,12 +6394,20 @@ class ProcMonUI:
         rank_badges = {ranked[i]["pid"]: ("①②③"[i] if i < 3 else None)
                        for i in range(min(3, len(ranked)))}
 
-        # First pass: drop shadows, painted under each bubble before
-        # any bubble cells go down. A shadow is a `▒` glyph offset one
-        # cell down + right of every cell on the bubble's bottom and
-        # right edges. Skip cells already occupied by other bubble
-        # paint by checking against starfield/empty markers later (we
-        # paint shadows now, so subsequent bubbles overdraw them).
+        # ── Living-galaxy effect 1/4: vendor color halos ─────────────
+        # Each bubble bleeds its vendor color into surrounding cells
+        # with radial falloff. Three concentric rings of progressively
+        # dimmer/sparser colored glyphs surround every bubble; the
+        # closer rings overdraw further ones, so when two bubbles are
+        # near each other their halos blend at the boundary. Halos
+        # paint over the starfield (vendor light occludes stars) but
+        # under the bubbles themselves.
+        ring_specs = [
+            # (distance_out, glyph, extra_attr)
+            (3, "·", curses.A_DIM),
+            (2, "+", curses.A_DIM),
+            (1, "◆", curses.A_BOLD),
+        ]
         for _area, r, bw, bh in sized:
             pid = r["pid"]
             pos = self._galaxy_positions.get(pid)
@@ -6340,23 +6418,45 @@ class ProcMonUI:
             y0 = int(y) - bh // 2
             x0 = max(0, min(body_w - bw, x0))
             y0 = max(0, min(body_h - bh, y0))
-            shadow_y = y0 + bh
-            shadow_attr = curses.A_DIM
-            if 0 <= shadow_y < body_h:
-                for dx in range(1, bw + 1):
-                    col_x = x0 + dx
-                    if 0 <= col_x < body_w:
-                        ch_existing = grid[shadow_y][col_x][0]
-                        if ch_existing == " " or ch_existing in ("·", "⋅"):
-                            grid[shadow_y][col_x] = ("▒", 10, shadow_attr)
-            shadow_x = x0 + bw
-            if 0 <= shadow_x < body_w:
-                for dy in range(1, bh):
-                    row_y = y0 + dy
-                    if 0 <= row_y < body_h:
-                        ch_existing = grid[row_y][shadow_x][0]
-                        if ch_existing == " " or ch_existing in ("·", "⋅"):
-                            grid[row_y][shadow_x] = ("▒", 10, shadow_attr)
+            vendor = self._galaxy_vendor_label(r)
+            tier = self._galaxy_load_tier(r, total_mem)
+            halo_pair = self._GALAXY_VENDOR_COLORS.get(
+                vendor, self._GALAXY_TIER_COLORS[tier])
+            # Paint halo rings from outermost to innermost so closer
+            # cells override further ones when the rings intersect.
+            for d, glyph, extra in ring_specs:
+                # Top + bottom rows of this ring.
+                for ring_y in (y0 - d, y0 + bh - 1 + d):
+                    if not (0 <= ring_y < body_h):
+                        continue
+                    for col_x in range(x0 - d, x0 + bw + d):
+                        if not (0 <= col_x < body_w):
+                            continue
+                        # Skip cells that are inside any bubble (will
+                        # be overdrawn anyway, but leave them empty so
+                        # the bubble's own paint wins cleanly).
+                        ch_existing = grid[ring_y][col_x][0]
+                        if ch_existing in ("╭", "╮", "╰", "╯",
+                                            "─", "│",
+                                            "╔", "╗", "╚", "╝",
+                                            "═", "║"):
+                            continue
+                        grid[ring_y][col_x] = (glyph, halo_pair, extra)
+                # Left + right cols of this ring (excluding corners
+                # already painted by the top/bottom rows above).
+                for ring_x in (x0 - d, x0 + bw - 1 + d):
+                    if not (0 <= ring_x < body_w):
+                        continue
+                    for row_y in range(y0 - d + 1, y0 + bh - 1 + d):
+                        if not (0 <= row_y < body_h):
+                            continue
+                        ch_existing = grid[row_y][ring_x][0]
+                        if ch_existing in ("╭", "╮", "╰", "╯",
+                                            "─", "│",
+                                            "╔", "╗", "╚", "╝",
+                                            "═", "║"):
+                            continue
+                        grid[row_y][ring_x] = (glyph, halo_pair, extra)
 
         for _area, r, bw, bh in sized:
             pid = r["pid"]
@@ -6495,6 +6595,90 @@ class ProcMonUI:
                             "◄", 3,
                             curses.A_BOLD | curses.A_BLINK,
                         )
+
+        # ── Living-galaxy effect 2/4: system pulse wave ──────────────
+        # When `_galaxy_pulse_wave_age` is in [0, max_age], paint a
+        # bright ring at the wave's current radius emanating from the
+        # cluster's centroid. The wave passes UNDER bubbles (overdrawn
+        # by them) but OVER halos and starfield.
+        wave_age = getattr(self, "_galaxy_pulse_wave_age", -1)
+        if wave_age >= 0 and nodes:
+            import math as _wave_math
+            cx_w = sum(self._galaxy_positions.get(r["pid"], (0, 0))[0]
+                        for r in nodes) / max(1, len(nodes))
+            cy_w = sum(self._galaxy_positions.get(r["pid"], (0, 0))[1]
+                        for r in nodes) / max(1, len(nodes))
+            wave_radius = (wave_age + 1) * 4.0
+            ring_pair = 7  # cyan
+            ring_extra = (curses.A_BOLD if wave_age <= 1
+                          else (0 if wave_age <= 3 else curses.A_DIM))
+            steps = max(16, int(2 * _wave_math.pi * wave_radius))
+            seen = set()
+            for s in range(steps):
+                ang = (2 * _wave_math.pi) * s / steps
+                wx = int(round(cx_w + wave_radius * _wave_math.cos(ang)))
+                # Compress y by 2 to compensate for terminal aspect
+                # so the wave reads as a circle, not an oval.
+                wy = int(round(cy_w + (wave_radius / 2.0) *
+                               _wave_math.sin(ang)))
+                if (wx, wy) in seen:
+                    continue
+                seen.add((wx, wy))
+                if not (0 <= wy < body_h and 0 <= wx < body_w):
+                    continue
+                # Don't overpaint bubble cells; ring goes around them.
+                ch_existing = grid[wy][wx][0]
+                if ch_existing in ("╭", "╮", "╰", "╯", "─", "│",
+                                    "╔", "╗", "╚", "╝", "═", "║"):
+                    continue
+                glyph = "·" if wave_age <= 1 else ("⋅" if wave_age <= 3
+                                                    else "·")
+                glyph = "•" if wave_age == 0 else glyph
+                grid[wy][wx] = (glyph, ring_pair, ring_extra)
+
+        # ── Living-galaxy effect 3/4: energy streams between
+        # active parent-child pairs. For each (parent, child) where
+        # both PIDs are in the cluster AND both have non-trivial CPU,
+        # paint one `●` particle at the position
+        #   t = (stream_phase + pid_offset) / segment_length
+        # along the line from parent to child. Cycles over time, so
+        # successive frames show the dot moving from parent to child
+        # like a packet flow visualization.
+        node_set = {r["pid"] for r in nodes}
+        active_threshold = 1.0
+        cpu_by_pid = {r["pid"]:
+                      (r.get("agg_cpu", r.get("cpu", 0)) or 0)
+                      for r in nodes}
+        sphase = getattr(self, "_galaxy_stream_phase", 0)
+        for r in nodes:
+            ppid = r.get("ppid", 0)
+            pid = r["pid"]
+            if (ppid not in node_set or ppid == pid
+                    or cpu_by_pid.get(pid, 0) < active_threshold
+                    or cpu_by_pid.get(ppid, 0) < active_threshold):
+                continue
+            p0 = self._galaxy_positions.get(ppid)
+            p1 = self._galaxy_positions.get(pid)
+            if p0 is None or p1 is None:
+                continue
+            x0_p, y0_p = p0
+            x1_p, y1_p = p1
+            dx = x1_p - x0_p
+            dy = y1_p - y0_p
+            dist = (dx * dx + dy * dy) ** 0.5
+            if dist < 4.0:
+                continue
+            # Particle position along the segment, cycling 0..1.
+            t = ((sphase + (pid % 17)) / 8.0) % 1.0
+            sx = int(round(x0_p + t * dx))
+            sy = int(round(y0_p + t * dy))
+            if not (0 <= sy < body_h and 0 <= sx < body_w):
+                continue
+            ch_existing = grid[sy][sx][0]
+            if ch_existing in ("╭", "╮", "╰", "╯", "─", "│",
+                                "╔", "╗", "╚", "╝", "═", "║"):
+                continue
+            grid[sy][sx] = ("●", 11, curses.A_BOLD)
 
         # Paint the grid into curses, coalescing adjacent same-attr runs.
         for row_y, row in enumerate(grid):
