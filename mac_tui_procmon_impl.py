@@ -3306,6 +3306,11 @@ class ProcMonUI:
         # (3,4,5) drops the bold so the bubble pulses on a 3-frame
         # heartbeat.
         self._galaxy_pulse_phase = 0
+        # Selection state for the focused bubble. None means "no
+        # selection yet" (the renderer auto-picks the heaviest bubble
+        # on first entry); arrow keys navigate to neighbours, Enter
+        # opens the existing Inspect view on the selected PID.
+        self._galaxy_selected_pid = None
         self._galaxy_known_pids = set()
         self._galaxy_node_cap = 80
         self._galaxy_iter_step = 0.5  # spring step length
@@ -4996,6 +5001,37 @@ class ProcMonUI:
                     self._stop_unified_log_stream()
                     return False
                 return True
+            elif self._galaxy_mode:
+                # Galaxy: arrow keys move the bubble selection along a
+                # 60° cone in the chosen direction; Enter opens the
+                # existing Inspect view on the selected PID.
+                if key == curses.KEY_UP:
+                    self._galaxy_move_selection("up")
+                elif key == curses.KEY_DOWN:
+                    self._galaxy_move_selection("down")
+                elif key == curses.KEY_LEFT:
+                    self._galaxy_move_selection("left")
+                elif key == curses.KEY_RIGHT:
+                    self._galaxy_move_selection("right")
+                elif key in (10, 13, curses.KEY_ENTER):
+                    sel = self._galaxy_selected_pid
+                    if sel is not None:
+                        # Find the row for the selected pid and call
+                        # Inspect on it (same as `I` key does for the
+                        # main-list selection).
+                        for i, r in enumerate(self.rows):
+                            if r.get("pid") == sel:
+                                self.selected = i
+                                break
+                        self._toggle_inspect_mode()
+                elif key == ord("\t"):
+                    self._detail_focus = False
+                elif key == 27:
+                    self._galaxy_mode = False
+                    self._detail_focus = False
+                elif key == ord("q"):
+                    return False
+                return True
             elif self._replay_mode:
                 # Feature 5: Attack Chain Replay scrubbing.
                 if key == curses.KEY_LEFT:
@@ -5459,6 +5495,7 @@ class ProcMonUI:
         self._galaxy_fork_rings = {}
         self._galaxy_trails = collections.deque(maxlen=3)
         self._galaxy_pulse_phase = 0
+        self._galaxy_selected_pid = None
         self._galaxy_known_pids = set()
 
     def _galaxy_select_nodes(self):
@@ -5903,6 +5940,79 @@ class ProcMonUI:
         bot = "╰" + "─" * inner_w + "╯"
         return [top] + ["│" + line + "│" for line in inner_lines] + [bot]
 
+    def _galaxy_move_selection(self, direction):
+        """Move `_galaxy_selected_pid` to the closest bubble in the
+        chosen direction, restricted to a 60° cone.
+
+        `direction` is one of 'up', 'down', 'left', 'right'. If the
+        current selection has no neighbour in that cone, selection
+        stays put.
+        """
+        import math
+        if not self._galaxy_positions:
+            return
+        if self._galaxy_selected_pid is None:
+            return
+        cur = self._galaxy_positions.get(self._galaxy_selected_pid)
+        if cur is None:
+            return
+        cx, cy = cur
+        # Direction vector. Compress y by 0.5 so a "right" cone uses
+        # roughly the visual cone the user sees on a 2:1-cell screen.
+        if direction == "up":
+            dvx, dvy = 0.0, -1.0
+        elif direction == "down":
+            dvx, dvy = 0.0, 1.0
+        elif direction == "left":
+            dvx, dvy = -1.0, 0.0
+        elif direction == "right":
+            dvx, dvy = 1.0, 0.0
+        else:
+            return
+        # 60° half-cone → cos(60°) = 0.5; we want angle from direction
+        # vector ≤ 60° meaning cos(angle) ≥ 0.5.
+        cone_cos = 0.5
+        best_pid = None
+        best_dist = None
+        for pid, pos in self._galaxy_positions.items():
+            if pid == self._galaxy_selected_pid:
+                continue
+            dx = pos[0] - cx
+            # Compress y so visual distance matches cell aspect.
+            dy = (pos[1] - cy) * 2.0
+            dist = math.hypot(dx, dy)
+            if dist <= 0:
+                continue
+            # Same compression for the cone test.
+            ddvx = dvx
+            ddvy = dvy * 2.0
+            mag_dir = math.hypot(ddvx, ddvy)
+            cos_a = (dx * ddvx + dy * ddvy) / (dist * mag_dir)
+            if cos_a < cone_cos:
+                continue
+            if best_dist is None or dist < best_dist:
+                best_dist = dist
+                best_pid = pid
+        if best_pid is not None:
+            self._galaxy_selected_pid = best_pid
+
+    def _galaxy_default_selection(self):
+        """Auto-select the heaviest bubble if no selection exists."""
+        if self._galaxy_selected_pid is not None:
+            if self._galaxy_selected_pid in self._galaxy_positions:
+                return
+            self._galaxy_selected_pid = None
+        nodes = self._galaxy_select_nodes()
+        if not nodes:
+            return
+        total_mem = max(1, self._total_mem_kb)
+        def _w(r):
+            cpu = r.get("agg_cpu", r.get("cpu", 0)) or 0
+            rss = r.get("agg_rss_kb", r.get("rss_kb", 0)) or 0
+            return cpu + (rss / total_mem) * 100.0
+        heaviest = max(nodes, key=_w)
+        self._galaxy_selected_pid = heaviest["pid"]
+
     @staticmethod
     def _galaxy_trend_badge(samples):
         """Pick a trend glyph from a list of recent CPU samples.
@@ -5980,6 +6090,10 @@ class ProcMonUI:
         the bubble canvas. The caller is responsible for rendering the
         shortcut bar at row h-1.
         """
+        # Auto-select the heaviest bubble on first entry / after the
+        # previously-selected PID disappears, so the user always has a
+        # valid selection to press Enter on.
+        self._galaxy_default_selection()
         # Header row
         nodes = self._galaxy_select_nodes()
         hidden = getattr(self, "_galaxy_hidden_count", 0)
@@ -6138,6 +6252,19 @@ class ProcMonUI:
             cpu_val = r.get("agg_cpu", r.get("cpu", 0)) or 0
             anomaly = cpu_val >= 80.0
             lines = self._galaxy_render_bubble(r, bw, bh)
+            # Selected bubble: thicker double-line border in bright cyan
+            # plus A_BOLD on the entire bubble.
+            is_selected = (pid == self._galaxy_selected_pid)
+            if is_selected:
+                # Swap border glyphs to double-line variants.
+                top = "╔" + "═" * (bw - 2) + "╗"
+                bot = "╚" + "═" * (bw - 2) + "╝"
+                lines = [top] + [
+                    "║" + ln[1:-1] + "║" for ln in lines[1:-1]
+                ] + [bot]
+                border_pair = 7  # cyan
+                border_extra |= curses.A_BOLD
+                inner_extra |= curses.A_BOLD
             for dy, line in enumerate(lines):
                 row_y = y0 + dy
                 if not (0 <= row_y < body_h):
@@ -6200,6 +6327,46 @@ class ProcMonUI:
                 try:
                     self._put(screen_y, run_start,
                               "".join(run_chars), run_attr)
+                except curses.error:
+                    pass
+
+        # Selection detail card: a 5-line floating overlay anchored to
+        # the top-right corner with PID, full command, ppid, threads,
+        # fds, RSS for the currently-selected bubble.
+        sel_pid = self._galaxy_selected_pid
+        if sel_pid is not None and w > 50 and h > 8:
+            sel_row = None
+            for r in nodes:
+                if r.get("pid") == sel_pid:
+                    sel_row = r
+                    break
+            if sel_row is not None:
+                rss_kb = sel_row.get("agg_rss_kb",
+                                     sel_row.get("rss_kb", 0)) or 0
+                if rss_kb >= 1024 * 1024:
+                    rss_label = f"{rss_kb / (1024 * 1024):.1f}G"
+                elif rss_kb >= 1024:
+                    rss_label = f"{rss_kb / 1024:.0f}M"
+                else:
+                    rss_label = f"{rss_kb}K"
+                cmd = (sel_row.get("command") or "").strip()
+                card_w = min(40, max(20, w // 3))
+                card_x = max(0, w - card_w - 1)
+                card_y = 1  # immediately under the header
+                lines_card = [
+                    f" PID  {sel_pid} ".ljust(card_w),
+                    f" CMD  {cmd[: card_w - 7]}".ljust(card_w),
+                    (f" ppid {sel_row.get('ppid', 0)}  "
+                     f"thr {sel_row.get('agg_threads', sel_row.get('threads', 0))}  "
+                     f"fds {sel_row.get('fds', 0)} ").ljust(card_w),
+                    f" RSS  {rss_label} ".ljust(card_w),
+                    f" Enter to Inspect ".ljust(card_w),
+                ]
+                try:
+                    for i, ln in enumerate(lines_card):
+                        self._put(card_y + i, card_x, ln,
+                                  curses.color_pair(7) | curses.A_REVERSE
+                                  | curses.A_BOLD)
                 except curses.error:
                     pass
 

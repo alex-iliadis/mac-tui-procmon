@@ -1135,7 +1135,8 @@ class TestProcessGalaxy:
     def _captured_attrs_for_heavy(self, monitor, phase):
         """Render fullscreen with a fixed pulse phase and return all
         captured _put attrs. Heavy bubble has cpu >= 30 to ensure
-        tier-4+."""
+        tier-4+. Force selection to a non-existent PID so the
+        feature-11 selection-bold doesn't pollute the assertion."""
         from unittest.mock import patch
         monitor._total_mem_kb = 16 * 1024 * 1024
         monitor._galaxy_mode = True
@@ -1146,7 +1147,15 @@ class TestProcessGalaxy:
              "cpu": 50.0, "agg_cpu": 50.0,
              "rss_kb": 2 * 1024 * 1024,
              "agg_rss_kb": 2 * 1024 * 1024},
+            {"pid": 2, "ppid": 0,
+             "command": "/Applications/Slack.app/Contents/MacOS/Slack",
+             "cpu": 60.0, "agg_cpu": 60.0,
+             "rss_kb": 3 * 1024 * 1024,
+             "agg_rss_kb": 3 * 1024 * 1024},
         ]
+        # Force selection on the heavier bubble (pid=2) so we measure
+        # the unselected one (pid=1) which receives no select-bold.
+        monitor._galaxy_selected_pid = 2
         captured = []
         def fake_put(y, x, text, attr=0):
             captured.append((y, x, text, attr))
@@ -1155,8 +1164,9 @@ class TestProcessGalaxy:
         with patch("curses.color_pair", side_effect=lambda n: n << 8), \
              patch.object(monitor, "_put", side_effect=fake_put), \
              patch.object(monitor, "_galaxy_step"):
-            # We still need positions populated, so place pid=1 manually.
+            # We still need positions populated, so place pids manually.
             monitor._galaxy_positions[1] = (60.0, 20.0)
+            monitor._galaxy_positions[2] = (90.0, 20.0)
             monitor._galaxy_render_fullscreen(120, 40)
         return captured
 
@@ -1300,6 +1310,124 @@ class TestProcessGalaxy:
         assert "Apple" in legend_text
         assert "Google" not in legend_text
         assert "Slack" not in legend_text
+
+    # ── Feature 11: Selectable bubble + detail card ─────────────────
+
+    def test_default_selection_picks_heaviest(self, monitor):
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        monitor.rows = [
+            {"pid": 1, "ppid": 0, "command": "/usr/bin/zsh",
+             "cpu": 1.0, "agg_cpu": 1.0,
+             "rss_kb": 1024, "agg_rss_kb": 1024},
+            {"pid": 2, "ppid": 0,
+             "command": "/Applications/Google Chrome.app/Contents/MacOS/"
+                        "Google Chrome",
+             "cpu": 80.0, "agg_cpu": 80.0,
+             "rss_kb": 2 * 1024 * 1024, "agg_rss_kb": 2 * 1024 * 1024},
+            {"pid": 3, "ppid": 0,
+             "command": "/Applications/Slack.app/Contents/MacOS/Slack",
+             "cpu": 30.0, "agg_cpu": 30.0,
+             "rss_kb": 100, "agg_rss_kb": 100},
+        ]
+        monitor._galaxy_default_selection()
+        assert monitor._galaxy_selected_pid == 2
+
+    def test_arrow_moves_selection_right(self, monitor):
+        monitor._galaxy_positions = {
+            1: (10.0, 10.0),
+            2: (50.0, 10.0),  # to the right
+            3: (10.0, 30.0),  # straight down
+        }
+        monitor._galaxy_selected_pid = 1
+        monitor._galaxy_move_selection("right")
+        assert monitor._galaxy_selected_pid == 2
+
+    def test_arrow_moves_selection_down(self, monitor):
+        monitor._galaxy_positions = {
+            1: (10.0, 10.0),
+            2: (50.0, 10.0),
+            3: (10.0, 30.0),
+        }
+        monitor._galaxy_selected_pid = 1
+        monitor._galaxy_move_selection("down")
+        assert monitor._galaxy_selected_pid == 3
+
+    def test_arrow_no_neighbour_keeps_selection(self, monitor):
+        monitor._galaxy_positions = {
+            1: (10.0, 10.0),
+            2: (50.0, 10.0),
+        }
+        monitor._galaxy_selected_pid = 2
+        # No bubble is to the right of pid 2.
+        monitor._galaxy_move_selection("right")
+        assert monitor._galaxy_selected_pid == 2
+
+    def test_enter_calls_inspect(self, monitor):
+        from unittest.mock import patch, MagicMock
+        monitor._galaxy_mode = True
+        monitor._detail_focus = True
+        # Stub all the other modes so we hit the galaxy branch.
+        for k in ("_inspect_mode", "_audit_mode", "_events_mode",
+                  "_traffic_mode", "_unified_log_mode", "_replay_mode"):
+            setattr(monitor, k, False)
+        monitor.rows = [
+            {"pid": 7, "ppid": 0, "command": "/usr/bin/zsh"},
+        ]
+        monitor._galaxy_selected_pid = 7
+        # `_log_mode` and `_chat_mode` are leading checks in handle_input.
+        monitor._log_mode = False
+        monitor._chat_mode = False
+        called = []
+        with patch.object(monitor, "_toggle_inspect_mode",
+                          side_effect=lambda: called.append(True)):
+            monitor.handle_input(10)  # Enter
+        assert called, "Enter should call _toggle_inspect_mode"
+
+    def test_selected_bubble_uses_double_border(self, monitor):
+        from unittest.mock import patch
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        monitor._galaxy_mode = True
+        monitor.rows = [
+            {"pid": 1, "ppid": 0,
+             "command": "/Applications/Slack.app/Contents/MacOS/Slack",
+             "cpu": 50.0, "agg_cpu": 50.0,
+             "rss_kb": 2 * 1024 * 1024,
+             "agg_rss_kb": 2 * 1024 * 1024},
+        ]
+        captured = []
+        def fake_put(y, x, text, attr=0):
+            captured.append((y, x, text, attr))
+        with patch("curses.color_pair", side_effect=lambda n: n << 8), \
+             patch.object(monitor, "_put", side_effect=fake_put):
+            monitor._galaxy_render_fullscreen(120, 40)
+        joined = "".join(t for _, _, t, _ in captured)
+        # The bubble (auto-selected) should use double-line border.
+        assert "╔" in joined or "═" in joined or "╚" in joined
+
+    def test_detail_card_painted_top_right(self, monitor):
+        from unittest.mock import patch
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        monitor._galaxy_mode = True
+        monitor.rows = [
+            {"pid": 42, "ppid": 0,
+             "command": "/Applications/Slack.app/Contents/MacOS/Slack",
+             "cpu": 50.0, "agg_cpu": 50.0,
+             "rss_kb": 1024 * 1024,
+             "agg_rss_kb": 1024 * 1024,
+             "threads": 7, "agg_threads": 7, "fds": 13},
+        ]
+        captured = []
+        def fake_put(y, x, text, attr=0):
+            captured.append((y, x, text, attr))
+        with patch("curses.color_pair", side_effect=lambda n: n << 8), \
+             patch.object(monitor, "_put", side_effect=fake_put):
+            monitor._galaxy_render_fullscreen(120, 40)
+        # Detail card painted under the header, near top-right (rows 1..5).
+        card_text = "".join(
+            t for y, x, t, _ in captured if 1 <= y <= 5 and x > 60)
+        assert "PID" in card_text
+        assert "42" in card_text
+        assert "Enter" in card_text
 
     def test_aspect_correction_uses_doubled_min_dy(self):
         """Static check: the overlap solver's required vertical
