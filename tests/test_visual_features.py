@@ -1605,20 +1605,141 @@ class TestProcessGalaxy:
         assert "min_dy = ((ph + qh) / 2.0 + 1.0) * 2.0" in src, \
             "min_dy in _galaxy_step must be scaled x2 for aspect correction"
 
-    def test_starfield_deterministic(self, monitor):
-        """Same canvas size renders the same star pattern (no shimmer)."""
+    def test_starfield_deterministic_at_fixed_phase(self, monitor):
+        """At a fixed `_galaxy_pulse_phase` the starfield renders the
+        same pattern between calls. The base star map is keyed on
+        canvas (x, y); only the twinkle modulation depends on phase."""
         monitor._total_mem_kb = 16 * 1024 * 1024
         monitor._galaxy_mode = True
         monitor.rows = []
-        # Two renders back-to-back must produce identical star layouts.
+        # Pin the pulse phase BEFORE each render — the live tick path
+        # would advance it, but here we want byte-stable output.
+        monitor._galaxy_pulse_phase = 2
         runs1 = self._capture_fullscreen(monitor)
+        monitor._galaxy_pulse_phase = 2
         runs2 = self._capture_fullscreen(monitor)
-        # Extract positions of star glyphs from each render.
         def stars(runs):
             out = set()
             for y, x, text, _ in runs:
                 for i, ch in enumerate(text):
-                    if ch in ("·", "⋅"):
+                    if ch in ("·", "⋅", "★", "✦"):
                         out.add((y, x + i, ch))
             return out
         assert stars(runs1) == stars(runs2)
+
+    def test_drop_shadow_painted_below_bubbles(self, monitor):
+        """Each bubble gets a `▒` drop-shadow stripe one cell down and
+        one cell right of its bottom-right edge so the cards look like
+        they're floating above the canvas."""
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        monitor._galaxy_mode = True
+        monitor.rows = [
+            {"pid": 42, "ppid": 0,
+             "command": "/Applications/Slack.app/Contents/MacOS/Slack",
+             "cpu": 30.0, "agg_cpu": 30.0,
+             "rss_kb": 200000, "agg_rss_kb": 200000},
+        ]
+        runs = self._capture_fullscreen(monitor, w=80, h=20)
+        joined = "".join(t for _, _, t, _ in runs)
+        assert "▒" in joined, "expected ▒ drop-shadow glyph in render"
+
+    def test_load_bar_uses_gradient_colors(self, monitor):
+        """The load bar's filled cells (`█`) are repainted in green,
+        yellow, or red based on their position within the bar — left
+        side green, middle yellow, right side red — instead of all
+        sharing the bubble's vendor color."""
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        monitor._galaxy_mode = True
+        # A heavy bubble so the bar is wide and definitely covers all
+        # three color zones.
+        monitor.rows = [
+            {"pid": 42, "ppid": 0,
+             "command": "/Applications/Slack.app/Contents/MacOS/Slack",
+             "cpu": 95.0, "agg_cpu": 95.0,
+             "rss_kb": 1024 * 1024, "agg_rss_kb": 1024 * 1024},
+        ]
+        runs = self._capture_fullscreen(monitor, w=120, h=30)
+        # Collect distinct attrs painted onto `█` cells. Without the
+        # gradient they'd all share the bubble's vendor color (one
+        # attr value); with the gradient we should see at least 2
+        # distinct attr combinations (low-zone vs mid/high-zone).
+        bar_attrs = set()
+        for _y, _x, text, attr in runs:
+            if "█" in text:
+                bar_attrs.add(attr)
+        assert len(bar_attrs) >= 2, \
+            f"load bar should paint different colors per zone, got attrs: {bar_attrs}"
+
+    def test_top_three_bubbles_get_rank_badges(self, monitor):
+        """Top 3 bubbles (by combined load score) get ①②③ glyphs in the
+        top-left corner of their borders. 4th bubble and beyond do not."""
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        monitor._galaxy_mode = True
+        monitor.rows = [
+            {"pid": 1, "ppid": 0, "cpu": 50.0, "agg_cpu": 50.0,
+             "rss_kb": 100, "agg_rss_kb": 100,
+             "command": "/Applications/A.app/Contents/MacOS/A"},
+            {"pid": 2, "ppid": 0, "cpu": 30.0, "agg_cpu": 30.0,
+             "rss_kb": 100, "agg_rss_kb": 100,
+             "command": "/Applications/B.app/Contents/MacOS/B"},
+            {"pid": 3, "ppid": 0, "cpu": 15.0, "agg_cpu": 15.0,
+             "rss_kb": 100, "agg_rss_kb": 100,
+             "command": "/Applications/C.app/Contents/MacOS/C"},
+            {"pid": 4, "ppid": 0, "cpu": 5.0, "agg_cpu": 5.0,
+             "rss_kb": 100, "agg_rss_kb": 100,
+             "command": "/Applications/D.app/Contents/MacOS/D"},
+        ]
+        runs = self._capture_fullscreen(monitor, w=140, h=30)
+        joined = "".join(t for _, _, t, _ in runs)
+        assert "①" in joined, "rank #1 badge missing"
+        assert "②" in joined, "rank #2 badge missing"
+        assert "③" in joined, "rank #3 badge missing"
+        # No rank-4+ glyph exists in the badge palette so we can't test
+        # absence of a specific char; instead assert the badge count is
+        # exactly 3.
+        assert sum(joined.count(g) for g in ("①", "②", "③")) == 3
+
+    def test_bob_phase_shifts_positions(self, monitor):
+        """Sine-wave bob: with all velocities zeroed and no overlap
+        forces in play, advancing `_galaxy_bob_phase` shifts a bubble's
+        position by a small amount each tick. Without bob a bubble
+        with zero velocity wouldn't move at all."""
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        # Pre-place a bubble so _galaxy_step doesn't randomise on its
+        # first call. Zero velocity so any movement is bob alone.
+        monitor.rows = [
+            {"pid": 7, "ppid": 0, "cpu": 5.0, "agg_cpu": 5.0,
+             "rss_kb": 100, "agg_rss_kb": 100,
+             "command": "/Applications/A.app/Contents/MacOS/A"},
+        ]
+        monitor._galaxy_positions = {7: (60.0, 15.0)}
+        monitor._galaxy_velocity = {7: (0.0, 0.0)}
+        monitor._galaxy_known_pids = {7}
+        before = monitor._galaxy_positions[7]
+        # Several ticks at zero velocity; bob alone should still move it.
+        for _ in range(3):
+            monitor._galaxy_step(120, 30)
+        after = monitor._galaxy_positions[7]
+        assert before != after, \
+            "bubble must drift via sine-wave bob even at zero velocity"
+
+    def test_starfield_twinkles_across_phases(self, monitor):
+        """Different `_galaxy_pulse_phase` values produce visibly
+        different star layouts — confirms the twinkle pass is
+        actually animating, not a no-op."""
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        monitor._galaxy_mode = True
+        monitor.rows = []
+        monitor._galaxy_pulse_phase = 0
+        runs0 = self._capture_fullscreen(monitor)
+        monitor._galaxy_pulse_phase = 4
+        runs4 = self._capture_fullscreen(monitor)
+        def stars(runs):
+            out = set()
+            for y, x, text, _ in runs:
+                for i, ch in enumerate(text):
+                    if ch in ("·", "⋅", "★", "✦"):
+                        out.add((y, x + i, ch))
+            return out
+        # At least some stars must differ between phases.
+        assert stars(runs0) != stars(runs4)

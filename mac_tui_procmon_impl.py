@@ -5684,9 +5684,15 @@ class ProcMonUI:
         big coins on coin360. Glow + position persistence still carry
         over.
         """
+        import math
         import random
         # Tick the pulse phase counter (0..5, wrapping).
         self._galaxy_pulse_phase = (self._galaxy_pulse_phase + 1) % 6
+        # Bob counter is a separate, larger-period frame counter used
+        # for the gentle sine-wave bob layered on top of drift. Wraps
+        # at 1000 to keep ints bounded.
+        self._galaxy_bob_phase = (
+            getattr(self, "_galaxy_bob_phase", 0) + 1) % 1000
         # Heat trail snapshot: capture the positions AT THIS POINT
         # (i.e. the result of the previous tick) so the renderer can
         # draw a fading trail behind each moving bubble. The deque is
@@ -5770,13 +5776,23 @@ class ProcMonUI:
                     random.uniform(-speed_y, speed_y),
                 )
 
-        # 1) Drift + wall bounce
+        # 1) Drift + sine-wave bob + wall bounce
+        # The bob is a small per-PID phase-offset sinusoid layered on
+        # the drift so even still-state bubbles look alive. Each PID
+        # gets its own phase (derived from pid) so the cluster bobs
+        # asynchronously rather than as a single sheet.
+        bob_amp_x = 0.18
+        bob_amp_y = 0.10
+        bob_period = 26.0  # ticks per full cycle
         for pid in node_pids:
             x, y = self._galaxy_positions[pid]
             vx, vy = self._galaxy_velocity.get(pid, (0.0, 0.0))
             bw, bh = sizes[pid]
             x += vx
             y += vy
+            phase = (self._galaxy_bob_phase + (pid % 31)) / bob_period
+            x += bob_amp_x * math.sin(phase * 2 * math.pi)
+            y += bob_amp_y * math.cos(phase * 2 * math.pi * 0.7)
             if x < bw / 2.0:
                 x = bw / 2.0
                 vx = -vx
@@ -6215,17 +6231,31 @@ class ProcMonUI:
         EMPTY = (" ", 0, 0)
         grid = [[EMPTY for _ in range(body_w)] for _ in range(body_h)]
 
-        # Starfield: deterministic procedural background painted before
-        # bubbles, so visible stars only show in empty regions. Pattern
-        # is keyed on (canvas_x, canvas_y) so it doesn't shimmer between
-        # frames (no random state to manage).
+        # Starfield with a twinkle pass: every frame we modulate which
+        # stars appear/disappear and which glyph they use, so the
+        # background looks alive instead of static. The pattern itself
+        # is still keyed on (canvas_x, canvas_y) so it stays stable —
+        # the modulation just animates a subset on top.
+        twinkle = getattr(self, "_galaxy_pulse_phase", 0)
         for sy in range(body_h):
             for sx in range(body_w):
                 k = (sx * 73 + sy * 131) & 0xFFFF
                 if k % 17 == 0:
-                    grid[sy][sx] = ("·", 10, curses.A_DIM)
+                    # Roughly 1 in 8 stars switches glyph each frame.
+                    if (k + twinkle * 41) % 8 == 0:
+                        grid[sy][sx] = ("✦", 10, curses.A_BOLD)
+                    else:
+                        grid[sy][sx] = ("·", 10, curses.A_DIM)
                 elif k % 31 == 0:
-                    grid[sy][sx] = ("⋅", 10, curses.A_DIM)
+                    # Tinier dots — dim by default, occasional bold.
+                    if (k + twinkle * 17) % 11 == 0:
+                        grid[sy][sx] = ("⋅", 10, 0)
+                    else:
+                        grid[sy][sx] = ("⋅", 10, curses.A_DIM)
+                elif k % 53 == 0 and (k + twinkle * 7) % 13 == 0:
+                    # Bonus rare ★ that twinkles in/out — gives the
+                    # background occasional 'shooting' moments.
+                    grid[sy][sx] = ("★", 3, curses.A_BOLD)
 
         # Heat trails: paint past-frame positions of each PID as
         # progressively dimmer dots so the cluster looks like it's
@@ -6283,6 +6313,51 @@ class ProcMonUI:
         # Smallest first so heavy ones overdraw.
         sized.sort(key=lambda t: t[0])
         total_mem = max(1, self._total_mem_kb)
+
+        # Pre-compute the top 3 bubbles by combined load — they get
+        # rank badges (#1 #2 #3) painted into their top-left corners.
+        def _rank_score(r):
+            cpu = r.get("agg_cpu", r.get("cpu", 0)) or 0
+            rss = r.get("agg_rss_kb", r.get("rss_kb", 0)) or 0
+            return cpu + (rss / total_mem) * 100.0
+        ranked = sorted(nodes, key=_rank_score, reverse=True)
+        rank_badges = {ranked[i]["pid"]: ("①②③"[i] if i < 3 else None)
+                       for i in range(min(3, len(ranked)))}
+
+        # First pass: drop shadows, painted under each bubble before
+        # any bubble cells go down. A shadow is a `▒` glyph offset one
+        # cell down + right of every cell on the bubble's bottom and
+        # right edges. Skip cells already occupied by other bubble
+        # paint by checking against starfield/empty markers later (we
+        # paint shadows now, so subsequent bubbles overdraw them).
+        for _area, r, bw, bh in sized:
+            pid = r["pid"]
+            pos = self._galaxy_positions.get(pid)
+            if pos is None:
+                continue
+            x, y = pos
+            x0 = int(x) - bw // 2
+            y0 = int(y) - bh // 2
+            x0 = max(0, min(body_w - bw, x0))
+            y0 = max(0, min(body_h - bh, y0))
+            shadow_y = y0 + bh
+            shadow_attr = curses.A_DIM
+            if 0 <= shadow_y < body_h:
+                for dx in range(1, bw + 1):
+                    col_x = x0 + dx
+                    if 0 <= col_x < body_w:
+                        ch_existing = grid[shadow_y][col_x][0]
+                        if ch_existing == " " or ch_existing in ("·", "⋅"):
+                            grid[shadow_y][col_x] = ("▒", 10, shadow_attr)
+            shadow_x = x0 + bw
+            if 0 <= shadow_x < body_w:
+                for dy in range(1, bh):
+                    row_y = y0 + dy
+                    if 0 <= row_y < body_h:
+                        ch_existing = grid[row_y][shadow_x][0]
+                        if ch_existing == " " or ch_existing in ("·", "⋅"):
+                            grid[row_y][shadow_x] = ("▒", 10, shadow_attr)
+
         for _area, r, bw, bh in sized:
             pid = r["pid"]
             pos = self._galaxy_positions.get(pid)
@@ -6342,6 +6417,14 @@ class ProcMonUI:
                 if not (0 <= row_y < body_h):
                     continue
                 is_top_or_bot = (dy == 0 or dy == bh - 1)
+                # Detect a load-bar row: looks like `[████░░░░] 47%`.
+                is_loadbar_row = (
+                    "[" in line and "]" in line and "%" in line
+                    and "█" in line)
+                bar_start = bar_end = -1
+                if is_loadbar_row:
+                    bar_start = line.index("[") + 1
+                    bar_end = line.index("]")
                 for dx, ch in enumerate(line):
                     col_x = x0 + dx
                     if not (0 <= col_x < body_w):
@@ -6353,7 +6436,24 @@ class ProcMonUI:
                         attr_extra = inner_extra
                         if anomaly:
                             attr_extra |= curses.A_BLINK
-                        grid[row_y][col_x] = (ch, fill_pair, attr_extra)
+                        # Gradient on filled load-bar cells: green
+                        # (low) → yellow (mid) → red (high), based on
+                        # the cell's position within the bar (so the
+                        # left side stays green even at 90% fill).
+                        if (is_loadbar_row and ch == "█"
+                                and bar_start <= dx < bar_end):
+                            bar_w = max(1, bar_end - bar_start)
+                            pos_pct = ((dx - bar_start + 0.5) / bar_w) * 100.0
+                            if pos_pct < 33:
+                                seg_pair = 1   # green
+                            elif pos_pct < 66:
+                                seg_pair = 3   # yellow
+                            else:
+                                seg_pair = 5   # red
+                            grid[row_y][col_x] = (
+                                ch, seg_pair, curses.A_BOLD)
+                        else:
+                            grid[row_y][col_x] = (ch, fill_pair, attr_extra)
 
             # Trend badge: replace the rightmost cell of the top
             # border with an ↑/↓/→ glyph based on recent CPU history.
@@ -6369,6 +6469,14 @@ class ProcMonUI:
                     badge_attr = curses.A_BOLD if glyph in ("↑", "↓") \
                         else curses.A_DIM
                     grid[badge_y][badge_x] = (glyph, badge_pair, badge_attr)
+
+            # Rank badge for the top 3 bubbles: ①②③ glyph in the
+            # top-left corner of the border, painted in bright yellow
+            # so the eye finds the leaderboard at a glance.
+            rb = rank_badges.get(pid)
+            if rb and 0 <= y0 < body_h and 0 <= x0 + 1 < body_w:
+                grid[y0][x0 + 1] = (
+                    rb, 3, curses.A_BOLD)
 
             # Selection chevrons: paint big ► / ◄ glyphs one cell
             # outside the selected bubble's left and right borders, on
