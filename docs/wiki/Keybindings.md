@@ -26,6 +26,9 @@ Every key the TUI binds, by mode.
 | `N`            | Toggle Network mode for the selected process          |
 | `I`            | Toggle Inspect mode for the selected process          |
 | `T`            | Toggle Deep Process Triage for the selected process   |
+| `U`            | Toggle Unified Log stream for selected process        |
+| `G`            | Toggle Process Galaxy fullscreen visualizer           |
+| `r`            | Toggle Attack Chain Replay                            |
 | `Shift+C`      | Open alert-config dialog                              |
 | `k`            | Kill the selected process (`SIGTERM`)                 |
 | `L`            | Toggle debug log overlay                              |
@@ -37,7 +40,7 @@ Every key the TUI binds, by mode.
 ## Detail focus — common keys
 
 These work in every detail mode (Inspect, Audit, Events, Traffic,
-Network):
+Network, Unified Log, Galaxy):
 
 | Key            | Action                            |
 |----------------|-----------------------------------|
@@ -77,10 +80,34 @@ Network):
 
 ## Network mode
 
-| Key | Action                                 |
-|-----|----------------------------------------|
-| `k` | Kill the highlighted connection        |
-| `N` | Toggle network mode off                |
+| Key | Action                                  |
+|-----|-----------------------------------------|
+| `g` | Toggle orbit constellation              |
+| `k` | Kill the highlighted connection owner   |
+| `N` | Toggle network mode off                 |
+
+## Unified Log mode
+
+| Key       | Action                         |
+|-----------|--------------------------------|
+| `c`       | Clear the log ring buffer      |
+| `Esc`/`q` | Stop `log stream` and close    |
+
+## Process Galaxy
+
+| Key       | Action                                      |
+|-----------|---------------------------------------------|
+| `↑`/`↓`/`←`/`→` | Move selected bubble                 |
+| `Enter`   | Inspect the selected PID                    |
+| `G`/`Esc` | Close galaxy mode                           |
+
+## Attack Chain Replay
+
+| Key     | Action                    |
+|---------|---------------------------|
+| `←`/`→` | Step through events       |
+| `Space` | Play / pause replay       |
+| `r`/`Esc` | Close replay mode       |
 
 ## Chat overlay (`?`)
 

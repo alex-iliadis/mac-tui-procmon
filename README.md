@@ -9,8 +9,8 @@
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](LICENSE)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![macOS 13+](https://img.shields.io/badge/macOS-13%2B-lightgrey)
-![Tests 1055 passing](https://img.shields.io/badge/tests-1055%20passing-brightgreen)
-![Coverage 75%](https://img.shields.io/badge/coverage-75%25-brightgreen)
+![Tests 1125 passing](https://img.shields.io/badge/tests-1125%20passing-brightgreen)
+![Coverage 79%](https://img.shields.io/badge/coverage-79%25-brightgreen)
 ![AI Claude · Codex · Gemini](https://img.shields.io/badge/AI-Claude%20%C2%B7%20Codex%20%C2%B7%20Gemini-8a2be2)
 
 </div>
@@ -36,7 +36,7 @@
 - **🏎 Three-Model Consensus Race.** While Inspect runs its analyses, claude / codex / gemini stream into three side-by-side lanes with live spinners and a `CONSENSUS_RISK` bar that fills 33% per finished lane; a divergence flasher fires when the lanes disagree on risk level.
 - **▶ Attack Chain Replay.** Captured event buffers persist on close; press `r` to enter a scrubbable replay with `←` / `→` / `space`, an event-density timeline at the bottom, and a heuristic linker that flags `curl → bash -c` patterns as potential drive-bys.
 - **🪐 Network Orbit.** From any network panel, press `g` for an animated constellation: the selected PID at the center, each remote endpoint orbiting on a circle, edges colored by service (HTTPS blue, HTTP yellow, SSH cyan, UDP magenta), animated `●` particles travelling along each edge to imply throughput.
-- **🌌 Process Galaxy.** Press `G` for a force-directed graph of the entire process tree, with parent → child edges, node glyphs sized by CPU%, and a glow on freshly-forked PIDs. Spring solver runs one iteration per refresh so the layout settles in front of you.
+- **🌌 Process Galaxy.** Press `G` for a fullscreen process galaxy: load-sized bubbles drift by vendor cluster, new PIDs flare with fork rings, active parent/child pairs emit packet trails, and the heaviest process bends the field with a subtle orbiting gravity lens.
 
 > [!NOTE]
 > **Process-monitoring only.** Host-wide security posture — TCC, kernel/boot, persistence, browser extensions, CVE intelligence, full security scoring, remediation workflows, headless audit reports — lives in the sister project [`mac-system-security`](https://github.com/alex-iliadis/mac-system-security).
@@ -53,6 +53,7 @@
   - [Sorting](#sorting)
   - [Dynamic Sort](#dynamic-sort)
   - [Filtering](#filtering)
+  - [Process Galaxy](#process-galaxy)
 - [Process Investigation](#process-investigation)
   - [Inspect](#inspect)
   - [Deep Process Triage](#deep-process-triage)
@@ -163,6 +164,21 @@ Substring match, case-insensitive. Combine both fields to narrow
 quickly to whatever you care about right now.
 
 ![Process Filter](screenshots/process-filter.png)
+
+### Process Galaxy
+
+Press `G` from the process list for the fullscreen galaxy view. It
+keeps the same process snapshot underneath, but renders it as a
+screen-recording-friendly activity map: bubbles are sized by combined
+CPU/RSS load, colored by vendor, ranked for the top three loads, and
+animated with starfield depth, comet streaks, fork rings, heat trails,
+packet tails between active parent/child processes, and a rotating
+gravity lens around the dominant process.
+
+![Process Galaxy](screenshots/process-galaxy.png)
+
+Arrow keys move the selected bubble, `Enter` opens Inspect for that
+PID, and `Esc` or `G` returns to the process list.
 
 ---
 
@@ -429,7 +445,7 @@ youruser ALL=(root) NOPASSWD: /usr/local/sbin/mac-tui-procmon-sudo *
 | `I`             | Toggle Inspect mode                                   |
 | `T`             | Toggle Deep Process Triage                            |
 | `U`             | Toggle Unified Log stream for selected process        |
-| `G`             | Toggle Process Galaxy (force-directed graph)          |
+| `G`             | Toggle Process Galaxy fullscreen visualizer           |
 | `r`             | Toggle Attack Chain Replay (scrubbable event buffer)  |
 | `Shift+C`       | Alert config dialog                                   |
 | `k`             | Kill selected process (`SIGTERM`)                     |
@@ -439,7 +455,7 @@ youruser ALL=(root) NOPASSWD: /usr/local/sbin/mac-tui-procmon-sudo *
 | `Esc`           | Close current special mode (or quit if none open)     |
 | `q`             | Quit                                                  |
 
-### Detail focus (Inspect / Audit / Events / Traffic / Network / Unified Log)
+### Detail focus (Inspect / Audit / Events / Traffic / Network / Unified Log / Galaxy)
 
 | Key             | Action                       |
 |-----------------|------------------------------|
@@ -457,7 +473,7 @@ Mode-specific extras:
 - **Traffic** — `c` clears flows; Esc/q stop the mitmdump shim.
 - **Network** — `k` SIGKILLs the connection's owning process (with confirmation); `g` toggles the orbit constellation; `N` closes.
 - **Unified Log** — `c` clears the ring buffer; `Esc`/`q` stop the `log stream` subprocess and close.
-- **Galaxy** — auto-iterates a Fruchterman-Reingold-ish spring solver; `Esc` closes.
+- **Galaxy** — fullscreen bubble map with starfield, comet streaks, fork rings, packet tails, and a gravity-lens swirl around the dominant process; arrow keys select bubbles, Enter opens Inspect, `Esc` closes.
 - **Replay** — `←`/`→` step, `space` toggles play. Drive-by-pattern hits are flagged with a ⚠ banner.
 
 ### Chat overlay (`?`)
@@ -562,7 +578,7 @@ External tools:
     --cov-report=term-missing
 ```
 
-Local: **1010 passed**. Coverage runs over `mac_tui_procmon_impl.py`
+Local: **1125 passed**. Coverage runs over `mac_tui_procmon_impl.py`
 (the 100% number on the public shim is an artifact of measuring the
 re-export module) — see [Testing](docs/wiki/Testing.md) for the full
 breakdown.

@@ -36,12 +36,12 @@ boundary so it runs in <10s without any real macOS APIs:
 
 | Target                       | Statements | Cover |
 |------------------------------|-----------:|------:|
-| `mac_tui_procmon_impl.py`    |       5770 |  75%  |
+| `mac_tui_procmon_impl.py`    |       7298 |  79%  |
 | `mac_tui_procmon` (shim)     |          - | 100%  |
 
 The shim re-exports from the implementation module — measuring
 coverage there is not meaningful. The honest number is the impl
-coverage: 75% across 5770 statements. The remaining 25% is mostly
+coverage: 79% across 7298 statements. The remaining 21% is mostly
 worker-thread bodies and error-recovery branches reachable only
 with a real osquery / codesign / Gatekeeper / mitmdump backend.
 
@@ -78,4 +78,4 @@ claude → codex → gemini fallback that backs `?`:
 
 ## Test counts
 
-`945 passed` locally. Run the full suite before pushing.
+`1125 passed` locally. Run the full suite before pushing.

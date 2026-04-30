@@ -868,6 +868,18 @@ class TestProcessGalaxy:
         assert "·" in joined or "⋅" in joined, \
             "expected starfield glyphs in the fullscreen render"
 
+    def test_starfield_paints_cinematic_comets(self, monitor):
+        """Screen-recorded galaxy backgrounds should include
+        deterministic comet streaks, not just static dots."""
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        monitor._galaxy_mode = True
+        monitor.rows = []
+        runs = self._capture_fullscreen(monitor, w=120, h=40)
+        joined = "".join(t for _, _, t, _ in runs)
+        assert "✹" in joined, "expected comet head glyph in starfield"
+        assert "•" in joined or "∙" in joined, \
+            "expected comet tail glyphs in starfield"
+
     def test_starfield_not_visible_inside_bubble(self, monitor):
         """A single heavy bubble: the cells inside its bounding box
         must show bubble glyphs / inverse fill, NOT starfield dots."""
@@ -1717,6 +1729,46 @@ class TestProcessGalaxy:
         joined = "".join(t for _, _, t, _ in runs)
         assert "●" in joined, "expected energy-stream particle glyph"
 
+    def test_energy_stream_renders_motion_tail(self, monitor):
+        """The active parent-child stream has a tail behind the bright
+        particle so motion reads clearly in screen recordings."""
+        from unittest.mock import patch
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        monitor._galaxy_mode = True
+        monitor.rows = [
+            {"pid": 100, "ppid": 0, "cpu": 50.0, "agg_cpu": 50.0,
+             "rss_kb": 100, "agg_rss_kb": 100,
+             "command": "/Applications/Chrome.app/Contents/MacOS/Chrome"},
+            {"pid": 200, "ppid": 100, "cpu": 25.0, "agg_cpu": 25.0,
+             "rss_kb": 100, "agg_rss_kb": 100,
+             "command": "/Applications/Chrome.app/Contents/MacOS/"
+                        "Chrome Helper"},
+        ]
+        monitor._galaxy_positions = {100: (20.0, 15.0),
+                                      200: (100.0, 15.0)}
+        monitor._galaxy_velocity = {100: (0.0, 0.0),
+                                     200: (0.0, 0.0)}
+        monitor._galaxy_known_pids = {100, 200}
+        monitor._galaxy_stream_phase = 0
+        captured = []
+        def fake_put(y, x, text, attr=0):
+            captured.append((y, x, text, attr))
+        with patch("curses.color_pair", side_effect=lambda n: n << 8), \
+             patch.object(monitor, "_put", side_effect=fake_put), \
+             patch.object(monitor, "_galaxy_step"):
+            monitor._galaxy_render_fullscreen(120, 40)
+        screen = {}
+        for y, x, text, _ in captured:
+            for i, ch in enumerate(text):
+                screen.setdefault(y, {})[x + i] = ch
+        # Body row 15 is painted at screen row 16 because row 0 is the
+        # header. With pid 200 and stream_phase 0 the head/tail sit on
+        # this straight parent-child segment.
+        assert screen.get(16, {}).get(44) == "●"
+        tail_chars = {screen.get(16, {}).get(38),
+                      screen.get(16, {}).get(31)}
+        assert "•" in tail_chars or "∙" in tail_chars
+
     def test_gravity_pulls_lighter_toward_heaviest(self, monitor):
         """Over many ticks a lighter bubble drifts measurably closer to
         the heaviest bubble than its starting distance."""
@@ -1743,6 +1795,28 @@ class TestProcessGalaxy:
         assert d_after < d_before, \
             f"gravity should reduce distance from {d_before:.1f} but " \
             f"got {d_after:.1f}"
+
+    def test_gravity_lens_renders_around_dominant_process(self, monitor):
+        """A multi-node galaxy paints a rotating lens around the
+        dominant process, giving the black-hole effect visible form."""
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        monitor._galaxy_mode = True
+        monitor.rows = [
+            {"pid": 1, "ppid": 0, "cpu": 80.0, "agg_cpu": 80.0,
+             "rss_kb": 100, "agg_rss_kb": 100,
+             "command": "/Applications/Heavy.app/Contents/MacOS/Heavy"},
+            {"pid": 2, "ppid": 1, "cpu": 10.0, "agg_cpu": 10.0,
+             "rss_kb": 100, "agg_rss_kb": 100,
+             "command": "/Applications/Light.app/Contents/MacOS/Light"},
+        ]
+        monitor._galaxy_positions = {1: (38.0, 15.0),
+                                      2: (95.0, 15.0)}
+        monitor._galaxy_velocity = {1: (0.0, 0.0), 2: (0.0, 0.0)}
+        monitor._galaxy_known_pids = {1, 2}
+        runs = self._capture_fullscreen(monitor, w=120, h=40)
+        joined = "".join(t for _, _, t, _ in runs)
+        assert any(ch in joined for ch in ("✧", "∘", "◦")), \
+            "expected gravity-lens glyphs around the dominant process"
 
     def test_load_bar_uses_gradient_colors(self, monitor):
         """The load bar's filled cells (`█`) are repainted in green,

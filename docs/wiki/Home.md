@@ -34,6 +34,9 @@ headless audit reports) lives in the sister project
   - Deep triage (`T`): adds osquery snapshot, injection /
     anti-debug evidence, structured cursor over findings.
 - Per-process network connection list with one-key kill (`k`).
+- Fullscreen Process Galaxy (`G`) with load-sized vendor bubbles,
+  fork rings, packet trails, comet streaks, and a gravity-lens
+  swirl around the dominant process.
 - Endpoint Security live event stream (exec, auth, login, TCC,
   XProtect) with a two-stage Esc that synthesizes an LLM summary
   before closing.

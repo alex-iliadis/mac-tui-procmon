@@ -28,6 +28,13 @@ Every user-facing feature in `mac-tui-procmon`, grouped by what it does.
   hotkey.
 - **Filter (`f`).** Substring filter on command name; supports
   multiple include and exclude patterns.
+- **Process Galaxy (`G`).** Fullscreen activity map of the current
+  process snapshot. Processes render as load-sized, vendor-colored
+  bubbles with top-three rank badges, fork rings for new PIDs,
+  heat trails, packet tails between active parent/child pairs,
+  comet streaks in the background, and a rotating gravity lens
+  around the dominant process. Arrow keys move bubble selection;
+  Enter opens Inspect for the selected PID.
 
 ## Per-process forensics (selected process only)
 
@@ -115,5 +122,5 @@ Every user-facing feature in `mac-tui-procmon`, grouped by what it does.
   real terminal.
 - **Semantic screen assertions** in `tui_screen_assertions.py` so
   tests describe screen content (not pixels).
-- **Coverage:** 5770 statements in the core impl module, 75%
-  covered by 945 tests.
+- **Coverage:** 7298 statements in the core impl module, 79%
+  covered by 1125 tests.

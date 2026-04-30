@@ -59,6 +59,15 @@ local, remote, foreign DNS. `k` prompts before SIGKILL'ing the
 **owning process** (true per-flow kill on macOS would need
 `pfctl`/`tcpkill` plumbing — currently out of scope).
 
+## Process Galaxy (`G`)
+
+Fullscreen visual map of the current process snapshot. Processes are
+load-sized, vendor-colored bubbles with top-three rank badges; the
+background has starfield depth and comet streaks; new PIDs get fork
+rings; active parent/child pairs emit packet tails; the dominant
+process gets a rotating gravity-lens spiral. Arrow keys move the
+selected bubble, Enter opens Inspect for that PID, and Esc closes.
+
 ## Per-process Unified Log (`U`)
 
 Live tail of `log stream --process <pid> --level info --style

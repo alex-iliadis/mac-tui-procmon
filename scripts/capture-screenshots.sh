@@ -132,6 +132,11 @@ press "f" 1.0
 shot "process-filter"
 press "Escape" 0.6
 
+# ── Process Galaxy fullscreen visualizer ──────────────────────────────
+press "G" 2.0
+shot "process-galaxy"
+press "Escape" 0.8
+
 # ── Alert config dialog ────────────────────────────────────────────────
 press "C" 1.0
 shot "alert-config"

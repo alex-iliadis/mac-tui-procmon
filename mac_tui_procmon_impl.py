@@ -5947,10 +5947,10 @@ class ProcMonUI:
 
         # 4) Gravity vortex. The heaviest bubble is the cluster's
         # "black hole" — every other bubble experiences a small
-        # constant pull toward it, scaled by inverse distance so the
-        # close-by ones swing tighter and the far ones drift in
-        # gradually. Combined with overlap-resolution and vendor
-        # attraction, the cluster orbits the dominant process.
+        # pull toward it plus a tangential nudge. The tangential
+        # component is intentionally subtle, but on video it makes
+        # the cluster feel like it is orbiting instead of only
+        # breathing in and out.
         if len(node_pids) >= 2:
             total_mem = max(1, self._total_mem_kb)
             def _grav_score(pid):
@@ -5964,6 +5964,7 @@ class ProcMonUI:
             heaviest_pid = max(node_pids, key=_grav_score)
             hx, hy = self._galaxy_positions[heaviest_pid]
             grav_strength = 0.04
+            orbit_strength = 0.035
             grav_min_dist = 4.0
             for pid in node_pids:
                 if pid == heaviest_pid:
@@ -5983,6 +5984,9 @@ class ProcMonUI:
                 uy = dy / dist
                 qx += ux * pull
                 qy += uy * pull
+                swirl = orbit_strength * min(1.0, 10.0 / dist)
+                qx += -uy * swirl
+                qy += ux * swirl * 0.65
                 qx = max(bw_q / 2.0, min(bound_w - bw_q / 2.0, qx))
                 qy = max(bh_q / 2.0, min(bound_h - bh_q / 2.0, qy))
                 self._galaxy_positions[pid] = (qx, qy)
@@ -6305,12 +6309,21 @@ class ProcMonUI:
         # stars appear/disappear and which glyph they use, so the
         # background looks alive instead of static. The pattern itself
         # is still keyed on (canvas_x, canvas_y) so it stays stable —
-        # the modulation just animates a subset on top.
+        # the modulation just animates a subset on top. A second,
+        # sparse nebula layer adds cyan/magenta/blue depth that reads
+        # well in compressed screen recordings.
         twinkle = getattr(self, "_galaxy_pulse_phase", 0)
         for sy in range(body_h):
             for sx in range(body_w):
                 k = (sx * 73 + sy * 131) & 0xFFFF
-                if k % 17 == 0:
+                band_a = (sx + sy * 2 + twinkle * 3) % 41
+                band_b = (sx * 2 - sy * 3 + twinkle * 5) % 53
+                if band_a in (0, 1) and k % 3 == 0:
+                    pair = 9 if (sx + sy + twinkle) % 2 == 0 else 8
+                    grid[sy][sx] = ("∙", pair, curses.A_DIM)
+                elif band_b == 0 and k % 5 == 0:
+                    grid[sy][sx] = ("˙", 7, curses.A_DIM)
+                elif k % 17 == 0:
                     # Roughly 1 in 8 stars switches glyph each frame.
                     if (k + twinkle * 41) % 8 == 0:
                         grid[sy][sx] = ("✦", 10, curses.A_BOLD)
@@ -6326,6 +6339,34 @@ class ProcMonUI:
                     # Bonus rare ★ that twinkles in/out — gives the
                     # background occasional 'shooting' moments.
                     grid[sy][sx] = ("★", 3, curses.A_BOLD)
+
+        # Deterministic shooting stars. These are tied to stream_phase
+        # rather than random state, so repeated renders at the same
+        # phase are stable while live video still shows diagonal motion.
+        comet_phase = getattr(self, "_galaxy_stream_phase", 0)
+        comet_count = 1 + min(3, body_w // 70)
+        comet_period = max(40, body_w + body_h)
+        for ci in range(comet_count):
+            head_x = ((comet_phase * (3 + ci) + ci * body_w // 3)
+                      % (comet_period + 16)) - 8
+            head_y = (body_h // 5 + ci * max(5, body_h // 4)
+                      + (comet_phase // (4 + ci))) % body_h
+            for tail in range(7):
+                sx = int(head_x - tail * 2)
+                sy = int(head_y + tail)
+                if not (0 <= sx < body_w and 0 <= sy < body_h):
+                    continue
+                if grid[sy][sx][0] in ("·", "⋅", "★", "✦"):
+                    continue
+                if tail == 0:
+                    glyph, pair, extra = "✹", 3, curses.A_BOLD
+                elif tail <= 2:
+                    glyph, pair, extra = "•", 7, curses.A_BOLD
+                elif tail <= 4:
+                    glyph, pair, extra = "∙", 9, curses.A_DIM
+                else:
+                    glyph, pair, extra = "˙", 10, curses.A_DIM
+                grid[sy][sx] = (glyph, pair, extra)
 
         # Heat trails: paint past-frame positions of each PID as
         # progressively dimmer dots so the cluster looks like it's
@@ -6373,6 +6414,42 @@ class ProcMonUI:
                 if 0 <= ry < body_h and 0 <= rx < body_w:
                     grid[ry][rx] = ("·", 3, ring_extra)
 
+        total_mem = max(1, self._total_mem_kb)
+
+        # Gravity-lens spiral around the dominant process. This is
+        # deliberately drawn before bubbles so process cards remain
+        # readable; only the surrounding field gets the rotating lens.
+        if len(nodes) >= 2:
+            def _lens_score(row):
+                cpu = row.get("agg_cpu", row.get("cpu", 0)) or 0
+                rss = row.get("agg_rss_kb", row.get("rss_kb", 0)) or 0
+                return cpu + (rss / max(1, self._total_mem_kb)) * 100.0
+            heavy = max(nodes, key=_lens_score)
+            hp = self._galaxy_positions.get(heavy["pid"])
+            if hp is not None:
+                import math as _lens_math
+                hx, hy = hp
+                lens_phase = (getattr(self, "_galaxy_stream_phase", 0)
+                              % 96) / 96.0 * 2.0 * _lens_math.pi
+                lens_tier = self._galaxy_load_tier(heavy, total_mem)
+                lens_pair = self._GALAXY_TIER_COLORS[lens_tier]
+                for arm in range(3):
+                    arm_base = lens_phase + arm * (2.0 * _lens_math.pi / 3.0)
+                    for step, radius in enumerate(range(7, 21, 2)):
+                        ang = arm_base + radius * 0.43
+                        lx = int(round(hx + radius * _lens_math.cos(ang)))
+                        ly = int(round(hy + (radius / 2.0) *
+                                       _lens_math.sin(ang)))
+                        if not (0 <= lx < body_w and 0 <= ly < body_h):
+                            continue
+                        if step == 0:
+                            glyph, extra = "✧", curses.A_BOLD
+                        elif step % 3 == 0:
+                            glyph, extra = "∘", curses.A_DIM
+                        else:
+                            glyph, extra = "◦", curses.A_DIM
+                        grid[ly][lx] = (glyph, lens_pair, extra)
+
         # Bubbles. In grid-fill mode we don't draw parent-child edges
         # (they'd cross other bubbles awkwardly and detract from the
         # crypto-bubble look). Edges live in the legacy split-view path.
@@ -6382,7 +6459,6 @@ class ProcMonUI:
             sized.append((bw * bh, r, bw, bh))
         # Smallest first so heavy ones overdraw.
         sized.sort(key=lambda t: t[0])
-        total_mem = max(1, self._total_mem_kb)
 
         # Pre-compute the top 3 bubbles by combined load — they get
         # rank badges (#1 #2 #3) painted into their top-left corners.
@@ -6394,13 +6470,11 @@ class ProcMonUI:
         rank_badges = {ranked[i]["pid"]: ("①②③"[i] if i < 3 else None)
                        for i in range(min(3, len(ranked)))}
 
-        # No halo. Earlier iterations tried both discrete colored
-        # rings and smooth Braille gradients; both ended up looking
-        # like noisy multi-color dust around the bubbles, competing
-        # with the bubble's own brand color and trend cells for
-        # attention. Cleaner: bubbles sit on the starfield and let
-        # the vendor color live INSIDE the box. Pulse waves and
-        # energy streams (below) carry the dynamic color outside.
+        # No per-bubble vendor halo. Earlier iterations tried both
+        # discrete colored rings and smooth Braille gradients; both
+        # competed with the bubble's own brand color and trend cells.
+        # The only external motion now comes from scene-level effects:
+        # gravity lens, pulse waves, and energy streams.
 
         for _area, r, bw, bh in sized:
             pid = r["pid"]
@@ -6583,7 +6657,7 @@ class ProcMonUI:
         # ── Living-galaxy effect 3/4: energy streams between
         # active parent-child pairs. For each (parent, child) where
         # both PIDs are in the cluster AND both have non-trivial CPU,
-        # paint one `●` particle at the position
+        # paint a bright `●` particle and a short tail at the position
         #   t = (stream_phase + pid_offset) / segment_length
         # along the line from parent to child. Cycles over time, so
         # successive frames show the dot moving from parent to child
@@ -6612,17 +6686,28 @@ class ProcMonUI:
             dist = (dx * dx + dy * dy) ** 0.5
             if dist < 4.0:
                 continue
-            # Particle position along the segment, cycling 0..1.
-            t = ((sphase + (pid % 17)) / 8.0) % 1.0
-            sx = int(round(x0_p + t * dx))
-            sy = int(round(y0_p + t * dy))
-            if not (0 <= sy < body_h and 0 <= sx < body_w):
-                continue
-            ch_existing = grid[sy][sx][0]
-            if ch_existing in ("╭", "╮", "╰", "╯", "─", "│",
-                                "╔", "╗", "╚", "╝", "═", "║"):
-                continue
-            grid[sy][sx] = ("●", 11, curses.A_BOLD)
+            # Particle position along the segment, cycling 0..1. Tail
+            # offsets are behind the head, so each active edge reads as
+            # a moving packet with motion blur instead of a single dot.
+            for tail_idx, tail_back in enumerate((0.0, 0.08, 0.16, 0.24)):
+                t = (((sphase + (pid % 17)) / 10.0) - tail_back) % 1.0
+                sx = int(round(x0_p + t * dx))
+                sy = int(round(y0_p + t * dy))
+                if not (0 <= sy < body_h and 0 <= sx < body_w):
+                    continue
+                ch_existing, _pair_existing, extra_existing = grid[sy][sx]
+                if (ch_existing in ("╭", "╮", "╰", "╯", "─", "│",
+                                    "╔", "╗", "╚", "╝", "═", "║")
+                        or (extra_existing & curses.A_REVERSE)):
+                    continue
+                if tail_idx == 0:
+                    grid[sy][sx] = ("●", 11, curses.A_BOLD)
+                elif tail_idx == 1:
+                    grid[sy][sx] = ("•", 7, curses.A_BOLD)
+                elif tail_idx == 2:
+                    grid[sy][sx] = ("∙", 9, curses.A_DIM)
+                else:
+                    grid[sy][sx] = ("˙", 10, curses.A_DIM)
 
         # Paint the grid into curses, coalescing adjacent same-attr runs.
         for row_y, row in enumerate(grid):

@@ -12,6 +12,7 @@ chat-overlay variant of the same surface.
 | `dynamic-sort.png`            | Dynamic-sort indicator (alert exceeders on top)    |
 | `alpha-sort.png`              | Alphabetical sort                                  |
 | `sort-dialog.png`             | Sort dialog (`s` key)                              |
+| `process-galaxy.png`          | Process Galaxy fullscreen visualizer (`G`)        |
 | `forensic-menu.png`           | Process Investigation menu                         |
 | `telemetry-menu.png`          | Live Telemetry menu (`E`)                          |
 | `inspect-view.png`            | Inspect mode (codesign + YARA + trust profile + sparkline TREND + IPC ports) |
