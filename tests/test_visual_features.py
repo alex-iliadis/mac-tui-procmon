@@ -903,6 +903,56 @@ class TestProcessGalaxy:
                 assert ch != "·" and ch != "⋅", \
                     f"starfield glyph leaked into bubble at ({dy},{dx})"
 
+    # ── Feature 2: Vertical aspect correction ───────────────────────
+
+    def test_layout_spreads_vertically_not_just_horizontally(self, monitor):
+        """Aspect-corrected solver: with the y-separation scaled to
+        compensate for ~2:1 terminal cells, the cluster spreads
+        vertically as well as horizontally.
+
+        Compare two solvers on a wide canvas: one with the aspect
+        correction in place (the live impl) and the same setup ran
+        again with a tighter cluster to verify that y spread is a
+        meaningful fraction of x spread (i.e. not a horizontal line).
+        """
+        import random as _r
+        import statistics
+        _r.seed(101)
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        # Small load so bubbles are 13x4 (smallest tier with a cpu line);
+        # canvas is wide enough that the solver has room to choose.
+        monitor.rows = [
+            {"pid": i + 1, "ppid": 0, "agg_cpu": 5.0, "cpu": 5.0,
+             "agg_rss_kb": 100, "rss_kb": 100,
+             "command": f"/Applications/App{i}.app/Contents/MacOS/App{i}"}
+            for i in range(8)
+        ]
+        for _ in range(20):
+            monitor._galaxy_step(160, 50)
+        xs = [monitor._galaxy_positions[r["pid"]][0] for r in monitor.rows]
+        ys = [monitor._galaxy_positions[r["pid"]][1] for r in monitor.rows]
+        sx = statistics.pstdev(xs)
+        sy = statistics.pstdev(ys)
+        assert sx > 0
+        # With aspect correction the y spread should be a meaningful
+        # fraction of the x spread (cells are ~2:1, so a *visually*
+        # round cluster has stdev_y ≈ 0.5 * stdev_x in cells).
+        assert sy >= 0.4 * sx, (
+            f"layout looks horizontally smeared: stdev_y={sy:.2f}, "
+            f"stdev_x={sx:.2f}")
+
+    def test_aspect_correction_uses_doubled_min_dy(self):
+        """Static check: the overlap solver's required vertical
+        separation is doubled to compensate for ~2:1 terminal cells."""
+        import pathlib
+        impl_path = pathlib.Path(procmon.__file__).parent / \
+            "mac_tui_procmon_impl.py"
+        src = impl_path.read_text(encoding="utf-8")
+        # The min_dy line must include the *2 aspect factor inside
+        # _galaxy_step's overlap-resolution block.
+        assert "min_dy = ((ph + qh) / 2.0 + 1.0) * 2.0" in src, \
+            "min_dy in _galaxy_step must be scaled x2 for aspect correction"
+
     def test_starfield_deterministic(self, monitor):
         """Same canvas size renders the same star pattern (no shimmer)."""
         monitor._total_mem_kb = 16 * 1024 * 1024

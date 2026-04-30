@@ -5670,8 +5670,13 @@ class ProcMonUI:
         # heaviest cards anchor the cluster.
         cx = bound_w / 2.0
         cy = bound_h / 2.0
-        sigma_x = max(4.0, bound_w / 5.0)
-        sigma_y = max(2.0, bound_h / 5.0)
+        # Aspect correction: terminal cells are ~2:1 (h:w), so for an
+        # initial cluster that *looks* round, sigma on x should be
+        # roughly twice sigma on y. Cap by canvas extent so the spawn
+        # never lands outside the visible area.
+        radius = min(bound_w / 4.0, bound_h / 2.0)
+        sigma_x = max(4.0, radius)
+        sigma_y = max(2.0, radius / 2.0)
         for r in nodes:
             pid = r["pid"]
             bw, bh = sizes[pid]
@@ -5716,6 +5721,11 @@ class ProcMonUI:
         # along the axis where they overlap less. Heavier bubbles
         # absorb less of the push (mass-weighted split) so they stay
         # roughly where they are while light ones get nudged out.
+        # Terminal cells are ~2:1 (h:w), so visually a "1 cell tall"
+        # gap reads as twice the size of a "1 cell wide" gap. We bias
+        # the smallest-overlap axis selection by scaling Y separation
+        # by 2.0, which makes the cluster spread vertically as well
+        # as horizontally and looks roughly circular on screen.
         for _ in range(4):
             for i, p in enumerate(node_pids):
                 px, py = self._galaxy_positions[p]
@@ -5729,7 +5739,13 @@ class ProcMonUI:
                     dx = px - qx
                     dy = py - qy
                     min_dx = (pw + qw) / 2.0 + 1.0
-                    min_dy = (ph + qh) / 2.0 + 1.0
+                    # Aspect correction: terminal cells are ~2:1
+                    # (h:w), so 1 cell of vertical drift reads as
+                    # ~2 cells of horizontal drift on screen. To get
+                    # a visually-circular cluster, scale required
+                    # vertical separation by ~2 so bubbles stack
+                    # taller before they crowd each other out.
+                    min_dy = ((ph + qh) / 2.0 + 1.0) * 2.0
                     ox = abs(dx) - min_dx
                     oy = abs(dy) - min_dy
                     # Both must be negative for the rectangles to
