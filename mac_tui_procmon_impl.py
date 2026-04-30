@@ -3298,6 +3298,9 @@ class ProcMonUI:
         # of frames since the bubble was first seen (0..5). When the
         # counter exceeds 5, the entry is popped.
         self._galaxy_fork_rings = {}
+        # Heat trails: a 3-frame ring buffer of past positions so each
+        # bubble leaves a fading trail of `·` glyphs as it drifts.
+        self._galaxy_trails = collections.deque(maxlen=3)
         self._galaxy_known_pids = set()
         self._galaxy_node_cap = 80
         self._galaxy_iter_step = 0.5  # spring step length
@@ -5449,6 +5452,7 @@ class ProcMonUI:
         self._galaxy_velocity = {}
         self._galaxy_glow = {}
         self._galaxy_fork_rings = {}
+        self._galaxy_trails = collections.deque(maxlen=3)
         self._galaxy_known_pids = set()
 
     def _galaxy_select_nodes(self):
@@ -5638,6 +5642,14 @@ class ProcMonUI:
         over.
         """
         import random
+        # Heat trail snapshot: capture the positions AT THIS POINT
+        # (i.e. the result of the previous tick) so the renderer can
+        # draw a fading trail behind each moving bubble. The deque is
+        # capped at 3 entries by the maxlen so memory is bounded.
+        if self._galaxy_positions:
+            self._galaxy_trails.append(
+                {pid: tuple(pos)
+                 for pid, pos in self._galaxy_positions.items()})
         nodes = self._galaxy_select_nodes()
         node_pids = [r["pid"] for r in nodes]
         node_set = set(node_pids)
@@ -6007,6 +6019,19 @@ class ProcMonUI:
                     grid[sy][sx] = ("·", 10, curses.A_DIM)
                 elif k % 31 == 0:
                     grid[sy][sx] = ("⋅", 10, curses.A_DIM)
+
+        # Heat trails: paint past-frame positions of each PID as
+        # progressively dimmer dots so the cluster looks like it's
+        # drifting rather than teleporting. Older snapshots are at
+        # lower indices in the deque, so they should fade more.
+        trail_attrs = [curses.A_DIM, curses.A_DIM, 0]
+        for ti, snapshot in enumerate(self._galaxy_trails):
+            attr = trail_attrs[min(ti, len(trail_attrs) - 1)]
+            for pid, (tx, ty) in snapshot.items():
+                ix = int(round(tx))
+                iy = int(round(ty))
+                if 0 <= ix < body_w and 0 <= iy < body_h:
+                    grid[iy][ix] = ("·", 10, attr)
 
         # Fork-ring pulse: for each newly-spotted PID, draw an
         # expanding concentric ring of `·` glyphs that grows by one

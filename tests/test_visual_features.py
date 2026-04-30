@@ -1110,6 +1110,26 @@ class TestProcessGalaxy:
         monitor._galaxy_step(60, 20)
         assert 2 not in monitor._galaxy_fork_rings
 
+    # ── Feature 7: Heat trails ──────────────────────────────────────
+
+    def test_trail_captured_after_tick(self, monitor):
+        monitor.rows = self._make_rows(3)
+        monitor._galaxy_step(60, 20)  # populates positions
+        # Second tick should record a trail snapshot (the pre-tick state).
+        monitor._galaxy_step(60, 20)
+        assert len(monitor._galaxy_trails) >= 1
+        # Each snapshot maps pid → (x, y) tuples.
+        snap = monitor._galaxy_trails[-1]
+        for pid, pos in snap.items():
+            assert isinstance(pos, tuple) and len(pos) == 2
+
+    def test_trail_deque_cap(self, monitor):
+        monitor.rows = self._make_rows(2)
+        for _ in range(10):
+            monitor._galaxy_step(60, 20)
+        # Maxlen=3 keeps the deque bounded.
+        assert len(monitor._galaxy_trails) <= 3
+
     def test_aspect_correction_uses_doubled_min_dy(self):
         """Static check: the overlap solver's required vertical
         separation is doubled to compensate for ~2:1 terminal cells."""
