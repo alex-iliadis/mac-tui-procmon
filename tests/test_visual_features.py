@@ -941,6 +941,37 @@ class TestProcessGalaxy:
             f"layout looks horizontally smeared: stdev_y={sy:.2f}, "
             f"stdev_x={sx:.2f}")
 
+    # ── Feature 3: Vendor logo glyphs ───────────────────────────────
+
+    def test_vendor_glyph_in_chrome_bubble(self, monitor):
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        row = {"pid": 100, "command":
+               "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+               "agg_cpu": 12.0, "agg_rss_kb": 300 * 1024}
+        bw, bh = monitor._galaxy_bubble_size(row)
+        lines = monitor._galaxy_render_bubble(row, bw, bh)
+        body = "\n".join(lines[1:-1])
+        assert procmon.ProcMonUI._GALAXY_VENDOR_GLYPHS["google"] in body
+
+    def test_vendor_glyph_in_slack_bubble(self, monitor):
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        row = {"pid": 101, "command":
+               "/Applications/Slack.app/Contents/MacOS/Slack",
+               "agg_cpu": 12.0, "agg_rss_kb": 300 * 1024}
+        bw, bh = monitor._galaxy_bubble_size(row)
+        lines = monitor._galaxy_render_bubble(row, bw, bh)
+        body = "\n".join(lines[1:-1])
+        assert procmon.ProcMonUI._GALAXY_VENDOR_GLYPHS["slack"] in body
+
+    def test_vendor_glyph_unknown_falls_back(self, monitor):
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        row = {"pid": 102, "command": "/Users/alice/random-binary",
+               "agg_cpu": 12.0, "agg_rss_kb": 300 * 1024}
+        bw, bh = monitor._galaxy_bubble_size(row)
+        lines = monitor._galaxy_render_bubble(row, bw, bh)
+        body = "\n".join(lines[1:-1])
+        assert procmon.ProcMonUI._GALAXY_VENDOR_GLYPHS["unknown"] in body
+
     def test_aspect_correction_uses_doubled_min_dy(self):
         """Static check: the overlap solver's required vertical
         separation is doubled to compensate for ~2:1 terminal cells."""

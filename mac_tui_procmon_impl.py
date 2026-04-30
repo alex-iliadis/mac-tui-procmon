@@ -5799,6 +5799,17 @@ class ProcMonUI:
         if glow:
             name = "★" + name
             name = name[: max(1, bw - 2)]
+        # Vendor glyph: prepend a single-cell logo so the cluster has
+        # an at-a-glance vendor cue even before colors register. Trim
+        # the name by 2 cells (glyph + space) to make room.
+        vendor = self._galaxy_vendor_label(row)
+        vendor_glyph = self._GALAXY_VENDOR_GLYPHS.get(
+            vendor, self._GALAXY_VENDOR_GLYPHS["unknown"])
+        # Reserve glyph + space for it; only when the bubble is wide
+        # enough to fit (otherwise just keep the name centered).
+        if bw - 2 >= 4:
+            name = name[: max(1, bw - 2 - 2)]
+            name = f"{vendor_glyph} {name}"
         cpu = row.get("agg_cpu", row.get("cpu", 0)) or 0
         rss_kb = row.get("agg_rss_kb", row.get("rss_kb", 0)) or 0
 
@@ -5836,6 +5847,24 @@ class ProcMonUI:
         top = "╭" + "─" * inner_w + "╮"
         bot = "╰" + "─" * inner_w + "╯"
         return [top] + ["│" + line + "│" for line in inner_lines] + [bot]
+
+    # Vendor → single-cell logo glyph rendered before the bubble's
+    # centered name. Emoji widths in curses are unreliable, so we use
+    # ASCII-safe glyphs that always occupy exactly one cell.
+    _GALAXY_VENDOR_GLYPHS = {
+        "google":     "@",
+        "apple":      "*",
+        "microsoft":  "W",
+        "mozilla":    "F",
+        "slack":      "#",
+        "discord":    "D",
+        "spotify":    "S",
+        "figma":      "+",
+        "docker":     "D",
+        "jetbrains":  "J",
+        "vscode":     "C",
+        "unknown":    "~",
+    }
 
     # Vendor → curses color_pair_id (declared in __init__'s init_pair table).
     _GALAXY_VENDOR_COLORS = {
