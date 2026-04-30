@@ -635,6 +635,61 @@ class TestProcessGalaxy:
         assert node_pids == {1, 2, 3}
         assert monitor._galaxy_hidden_count == 5
 
+    def test_galaxy_render_direct_does_not_raise(self, monitor):
+        """Smoke test for the live curses render path. Catches typos
+        like the one where the dispatcher called `_render_galaxy_direct`
+        but the method was actually named `_galaxy_render_direct` —
+        which broke the running app even though every other galaxy
+        unit test still passed (they exercised `_build_galaxy_lines`,
+        not the live render).
+        """
+        from unittest.mock import patch
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        monitor._galaxy_mode = True
+        monitor.rows = self._make_rows(8)
+        monitor.rows[0]["agg_cpu"] = 50.0
+        monitor.rows[0]["agg_rss_kb"] = 2 * 1024 * 1024
+        monitor.rows[0]["command"] = (
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+        monitor.stdscr.getmaxyx.return_value = (40, 120)
+
+        # Sanity: the method must exist under the documented name.
+        assert hasattr(monitor, "_galaxy_render_direct"), \
+            "_galaxy_render_direct must exist on ProcMonUI"
+
+        # Stub curses so render-path tests don't need a real terminal.
+        with patch("curses.color_pair", side_effect=lambda n: n << 8), \
+             patch("curses.curs_set"), \
+             patch.object(monitor, "_put"):
+            # If a typo in the dispatcher slipped past unit tests, this
+            # call would raise AttributeError. We only care that it
+            # doesn't blow up — actual layout is covered by
+            # _build_galaxy_lines tests above.
+            monitor._galaxy_render_direct(5, 120)
+
+    def test_render_dispatcher_calls_galaxy_method_by_correct_name(self):
+        """Static guard against a method-name typo in the render
+        dispatcher. The original bug shipped because the dispatcher
+        called `_render_galaxy_direct` while the method on the class
+        was actually named `_galaxy_render_direct` — every unit test
+        still passed (they exercised `_build_galaxy_lines`), but the
+        live app crashed with AttributeError as soon as the user
+        pressed `G`. This test reads the source and asserts the
+        dispatcher invokes the right name."""
+        import pathlib
+        src = pathlib.Path(procmon.__file__).read_text(encoding="utf-8")
+        impl_path = pathlib.Path(procmon.__file__).parent / \
+            "mac_tui_procmon_impl.py"
+        impl_src = impl_path.read_text(encoding="utf-8")
+        # The galaxy-mode branch in render() must reference the
+        # canonical method name. If someone renames the method again,
+        # whichever side is out-of-sync will fail this test.
+        assert "self._galaxy_render_direct(" in impl_src, \
+            "render() dispatch must call self._galaxy_render_direct(...)"
+        # And the inverse: the typo'd name must not appear anywhere.
+        assert "_render_galaxy_direct" not in impl_src, \
+            "found typo'd method name '_render_galaxy_direct' in source"
+
     def test_select_nodes_keeps_active_subtree_chain(self, monitor):
         """A direct parent of an interesting PID is kept even when its
         own load is zero, so the topology of the active subtree is

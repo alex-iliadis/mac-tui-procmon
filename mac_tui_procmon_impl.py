@@ -4377,7 +4377,7 @@ class ProcMonUI:
         # Galaxy mode renders directly with full color / blink / glow
         # support; skip the generic detail pane to avoid double-drawing.
         if self._galaxy_mode:
-            self._render_galaxy_direct(detail_y, w)
+            self._galaxy_render_direct(detail_y, w)
         else:
             self._render_detail(detail_y, w, detail_all_lines,
                                 detail_title, scroll, self._detail_focus,
