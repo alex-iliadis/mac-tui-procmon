@@ -6314,19 +6314,29 @@ class ProcMonUI:
             cpu_val = r.get("agg_cpu", r.get("cpu", 0)) or 0
             anomaly = cpu_val >= 80.0
             lines = self._galaxy_render_bubble(r, bw, bh)
-            # Selected bubble: thicker double-line border in bright cyan
-            # plus A_BOLD on the entire bubble.
+            # Selected bubble: very prominent — bright yellow double-line
+            # border that BLINKS, A_BOLD throughout, and chevron markers
+            # painted just outside the left/right borders so the eye
+            # finds it instantly. When something is selected, the OTHER
+            # bubbles dim to A_DIM so the selected one pops by contrast.
             is_selected = (pid == self._galaxy_selected_pid)
+            something_selected = (self._galaxy_selected_pid is not None
+                                   and self._galaxy_selected_pid in
+                                   {r2["pid"] for r2 in nodes})
             if is_selected:
-                # Swap border glyphs to double-line variants.
                 top = "╔" + "═" * (bw - 2) + "╗"
                 bot = "╚" + "═" * (bw - 2) + "╝"
                 lines = [top] + [
                     "║" + ln[1:-1] + "║" for ln in lines[1:-1]
                 ] + [bot]
-                border_pair = 7  # cyan
-                border_extra |= curses.A_BOLD
+                border_pair = 3  # bright yellow
+                border_extra = curses.A_BOLD | curses.A_BLINK
                 inner_extra |= curses.A_BOLD
+            elif something_selected:
+                # Demote the rest of the cluster so the selected card
+                # carries all the visual weight.
+                border_extra |= curses.A_DIM
+                inner_extra |= curses.A_DIM
             for dy, line in enumerate(lines):
                 row_y = y0 + dy
                 if not (0 <= row_y < body_h):
@@ -6360,6 +6370,24 @@ class ProcMonUI:
                         else curses.A_DIM
                     grid[badge_y][badge_x] = (glyph, badge_pair, badge_attr)
 
+            # Selection chevrons: paint big ► / ◄ glyphs one cell
+            # outside the selected bubble's left and right borders, on
+            # the bubble's vertical center. Combined with the blinking
+            # yellow border, the selected card is impossible to miss.
+            if is_selected:
+                center_y = y0 + bh // 2
+                if 0 <= center_y < body_h:
+                    if x0 - 2 >= 0:
+                        grid[center_y][x0 - 2] = (
+                            "►", 3,
+                            curses.A_BOLD | curses.A_BLINK,
+                        )
+                    if x0 + bw + 1 < body_w:
+                        grid[center_y][x0 + bw + 1] = (
+                            "◄", 3,
+                            curses.A_BOLD | curses.A_BLINK,
+                        )
+
         # Paint the grid into curses, coalescing adjacent same-attr runs.
         for row_y, row in enumerate(grid):
             screen_y = body_top + row_y
@@ -6389,46 +6417,6 @@ class ProcMonUI:
                 try:
                     self._put(screen_y, run_start,
                               "".join(run_chars), run_attr)
-                except curses.error:
-                    pass
-
-        # Selection detail card: a 5-line floating overlay anchored to
-        # the top-right corner with PID, full command, ppid, threads,
-        # fds, RSS for the currently-selected bubble.
-        sel_pid = self._galaxy_selected_pid
-        if sel_pid is not None and w > 50 and h > 8:
-            sel_row = None
-            for r in nodes:
-                if r.get("pid") == sel_pid:
-                    sel_row = r
-                    break
-            if sel_row is not None:
-                rss_kb = sel_row.get("agg_rss_kb",
-                                     sel_row.get("rss_kb", 0)) or 0
-                if rss_kb >= 1024 * 1024:
-                    rss_label = f"{rss_kb / (1024 * 1024):.1f}G"
-                elif rss_kb >= 1024:
-                    rss_label = f"{rss_kb / 1024:.0f}M"
-                else:
-                    rss_label = f"{rss_kb}K"
-                cmd = (sel_row.get("command") or "").strip()
-                card_w = min(40, max(20, w // 3))
-                card_x = max(0, w - card_w - 1)
-                card_y = 1  # immediately under the header
-                lines_card = [
-                    f" PID  {sel_pid} ".ljust(card_w),
-                    f" CMD  {cmd[: card_w - 7]}".ljust(card_w),
-                    (f" ppid {sel_row.get('ppid', 0)}  "
-                     f"thr {sel_row.get('agg_threads', sel_row.get('threads', 0))}  "
-                     f"fds {sel_row.get('fds', 0)} ").ljust(card_w),
-                    f" RSS  {rss_label} ".ljust(card_w),
-                    f" Enter to Inspect ".ljust(card_w),
-                ]
-                try:
-                    for i, ln in enumerate(lines_card):
-                        self._put(card_y + i, card_x, ln,
-                                  curses.color_pair(7) | curses.A_REVERSE
-                                  | curses.A_BOLD)
                 except curses.error:
                     pass
 

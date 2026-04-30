@@ -1404,7 +1404,10 @@ class TestProcessGalaxy:
         # The bubble (auto-selected) should use double-line border.
         assert "╔" in joined or "═" in joined or "╚" in joined
 
-    def test_detail_card_painted_top_right(self, monitor):
+    def test_selected_bubble_has_chevron_markers(self, monitor):
+        """The selected bubble carries ► / ◄ chevron glyphs one cell
+        outside its left/right borders so it's instantly visible during
+        navigation. Replaces the old top-right detail card."""
         from unittest.mock import patch
         monitor._total_mem_kb = 16 * 1024 * 1024
         monitor._galaxy_mode = True
@@ -1416,18 +1419,46 @@ class TestProcessGalaxy:
              "agg_rss_kb": 1024 * 1024,
              "threads": 7, "agg_threads": 7, "fds": 13},
         ]
+        monitor._galaxy_selected_pid = 42
         captured = []
         def fake_put(y, x, text, attr=0):
             captured.append((y, x, text, attr))
         with patch("curses.color_pair", side_effect=lambda n: n << 8), \
              patch.object(monitor, "_put", side_effect=fake_put):
             monitor._galaxy_render_fullscreen(120, 40)
-        # Detail card painted under the header, near top-right (rows 1..5).
-        card_text = "".join(
-            t for y, x, t, _ in captured if 1 <= y <= 5 and x > 60)
-        assert "PID" in card_text
-        assert "42" in card_text
-        assert "Enter" in card_text
+        joined = "".join(t for _, _, t, _ in captured)
+        assert "►" in joined, "left chevron must render next to selected"
+        assert "◄" in joined, "right chevron must render next to selected"
+
+    def test_detail_card_no_longer_rendered(self, monitor):
+        """The previous top-right detail card is gone — no PID line, no
+        'Enter to Inspect' hint should appear in the rendered output."""
+        from unittest.mock import patch
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        monitor._galaxy_mode = True
+        monitor.rows = [
+            {"pid": 42, "ppid": 0,
+             "command": "/Applications/Slack.app/Contents/MacOS/Slack",
+             "cpu": 50.0, "agg_cpu": 50.0,
+             "rss_kb": 1024 * 1024,
+             "agg_rss_kb": 1024 * 1024,
+             "threads": 7, "agg_threads": 7, "fds": 13},
+        ]
+        monitor._galaxy_selected_pid = 42
+        captured = []
+        def fake_put(y, x, text, attr=0):
+            captured.append((y, x, text, attr))
+        with patch("curses.color_pair", side_effect=lambda n: n << 8), \
+             patch.object(monitor, "_put", side_effect=fake_put):
+            monitor._galaxy_render_fullscreen(120, 40)
+        joined = "\n".join(t for _, _, t, _ in captured)
+        assert "Enter to Inspect" not in joined
+        # No `PID  42` block (with the trailing two spaces) painted in
+        # the upper-right area as the old card did.
+        for y, x, t, _ in captured:
+            if 1 <= y <= 5 and x > 60:
+                assert "PID  42" not in t, \
+                    f"detail card line still painted at y={y} x={x}: {t!r}"
 
     # ── Feature 12: Vendor clustering ───────────────────────────────
 
