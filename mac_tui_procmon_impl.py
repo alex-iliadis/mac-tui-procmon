@@ -5620,25 +5620,27 @@ class ProcMonUI:
         return "unknown"
 
     def _galaxy_step(self, w, h):
-        """Pack bubbles in a row-fill grid (biggest first → top-left,
-        wrap to next row when the current one fills, vertical padding
-        between rows). Replaces the previous force-directed spring
-        solver: bubbles in a stable grid read like a crypto-bubble
-        dashboard rather than dancing in 2D space.
+        """Crypto-bubble floating cluster layout.
 
-        Still tracks `_galaxy_glow` for newly-spotted PIDs and
-        evicts dropped ones, so the existing fork-glow effect carries
-        over. `_galaxy_velocity` is no longer used; left in place as
-        an empty dict for backward compatibility.
+        Each tick we (1) drift every bubble by its small random velocity
+        (vertical drift dampened by ~50% so the cluster looks stable
+        rather than jittery), (2) bounce off the canvas walls, (3) run
+        a few iterations of overlap-resolution that push intersecting
+        rectangles apart along the smallest-overlap axis. New bubbles
+        spawn near the center with a gaussian scatter; heavier bubbles
+        drift more slowly so they anchor the centre of mass like the
+        big coins on coin360. Glow + position persistence still carry
+        over.
         """
+        import random
         nodes = self._galaxy_select_nodes()
         node_pids = [r["pid"] for r in nodes]
         node_set = set(node_pids)
-        # Track new PIDs for glow effect
+
+        # Glow / known-pid tracking (same lifecycle as before).
         for pid in node_pids:
             if pid not in self._galaxy_known_pids:
                 self._galaxy_glow[pid] = 6
-        # Decrement glow; evict PIDs that left the snapshot.
         for pid in list(self._galaxy_glow.keys()):
             if pid not in node_set:
                 self._galaxy_glow.pop(pid, None)
@@ -5648,56 +5650,123 @@ class ProcMonUI:
             else:
                 self._galaxy_glow.pop(pid, None)
         self._galaxy_known_pids = node_set
-        # Drop positions for nodes no longer present.
+
+        # Drop positions/velocities for PIDs that left the snapshot.
         for pid in list(self._galaxy_positions.keys()):
             if pid not in node_set:
                 self._galaxy_positions.pop(pid, None)
-        # Velocity dict is unused under grid-fill but kept around for
-        # the fixture / backward-compat tests.
-        self._galaxy_velocity = {}
+                self._galaxy_velocity.pop(pid, None)
 
-        # Canvas bounds. The fullscreen renderer passes the entire
-        # screen area minus header/shortcut; the legacy split-pane
-        # path passes a smaller `h`.
-        bound_w = max(20, w - 2)
-        bound_h = max(6, h - 2)
         if not node_pids:
             return
 
-        # Sort by combined load score descending so heaviest bubble
-        # lands top-left. (Mirrors the `_score` helper inside
-        # `_galaxy_select_nodes`; we recompute here to keep the row
-        # order consistent with bubble size.)
-        total_mem = max(1, self._total_mem_kb)
-        def _sort_score(r):
-            cpu = r.get("agg_cpu", r.get("cpu", 0)) or 0
-            rss = r.get("agg_rss_kb", r.get("rss_kb", 0)) or 0
-            return cpu + (rss / total_mem) * 100.0
-        ordered = sorted(nodes, key=_sort_score, reverse=True)
+        bound_w = max(20, w - 2)
+        bound_h = max(6, h - 2)
+        sizes = {r["pid"]: self._galaxy_bubble_size(r) for r in nodes}
 
-        # Row-fill packing: place each bubble at the next free slot.
-        # When the next bubble would overflow the row, wrap to the
-        # next line at x=0 and advance y by the row's max bubble
-        # height + vertical padding.
-        H_PAD = 1
-        V_PAD = 1
-        x = 0
-        y = 0
-        row_h = 0
-        for r in ordered:
-            bw, bh = self._galaxy_bubble_size(r)
-            if x > 0 and x + bw > bound_w:
-                x = 0
-                y += row_h + V_PAD
-                row_h = 0
-            # Position is the bubble's center (the renderer subtracts
-            # bw/2 / bh/2 to get the top-left corner). +0.5 is a tiny
-            # nudge to avoid x-1//2 floor flicker on edges.
-            self._galaxy_positions[r["pid"]] = (x + bw / 2.0,
-                                                  y + bh / 2.0)
-            x += bw + H_PAD
-            if bh > row_h:
-                row_h = bh
+        # Initial placement for new PIDs: center-biased gaussian, which
+        # gives a clustered look right away rather than a uniform random
+        # field. Velocity is small + heavier bubbles drift slower so the
+        # heaviest cards anchor the cluster.
+        cx = bound_w / 2.0
+        cy = bound_h / 2.0
+        sigma_x = max(4.0, bound_w / 5.0)
+        sigma_y = max(2.0, bound_h / 5.0)
+        for r in nodes:
+            pid = r["pid"]
+            bw, bh = sizes[pid]
+            if pid not in self._galaxy_positions:
+                x = cx + random.gauss(0, sigma_x)
+                y = cy + random.gauss(0, sigma_y)
+                x = max(bw / 2.0, min(bound_w - bw / 2.0, x))
+                y = max(bh / 2.0, min(bound_h - bh / 2.0, y))
+                self._galaxy_positions[pid] = (x, y)
+                # Heavier = slower drift. Use bubble area as mass.
+                mass = bw * bh
+                speed_x = 0.35 / (mass / 60.0 + 1.0)
+                speed_y = 0.18 / (mass / 60.0 + 1.0)
+                self._galaxy_velocity[pid] = (
+                    random.uniform(-speed_x, speed_x),
+                    random.uniform(-speed_y, speed_y),
+                )
+
+        # 1) Drift + wall bounce
+        for pid in node_pids:
+            x, y = self._galaxy_positions[pid]
+            vx, vy = self._galaxy_velocity.get(pid, (0.0, 0.0))
+            bw, bh = sizes[pid]
+            x += vx
+            y += vy
+            if x < bw / 2.0:
+                x = bw / 2.0
+                vx = -vx
+            elif x > bound_w - bw / 2.0:
+                x = bound_w - bw / 2.0
+                vx = -vx
+            if y < bh / 2.0:
+                y = bh / 2.0
+                vy = -vy
+            elif y > bound_h - bh / 2.0:
+                y = bound_h - bh / 2.0
+                vy = -vy
+            self._galaxy_positions[pid] = (x, y)
+            self._galaxy_velocity[pid] = (vx, vy)
+
+        # 2) Overlap resolution — separate intersecting rectangles
+        # along the axis where they overlap less. Heavier bubbles
+        # absorb less of the push (mass-weighted split) so they stay
+        # roughly where they are while light ones get nudged out.
+        for _ in range(4):
+            for i, p in enumerate(node_pids):
+                px, py = self._galaxy_positions[p]
+                pw, ph = sizes[p]
+                p_mass = pw * ph
+                for j in range(i + 1, len(node_pids)):
+                    q = node_pids[j]
+                    qx, qy = self._galaxy_positions[q]
+                    qw, qh = sizes[q]
+                    q_mass = qw * qh
+                    dx = px - qx
+                    dy = py - qy
+                    min_dx = (pw + qw) / 2.0 + 1.0
+                    min_dy = (ph + qh) / 2.0 + 1.0
+                    ox = abs(dx) - min_dx
+                    oy = abs(dy) - min_dy
+                    # Both must be negative for the rectangles to
+                    # actually overlap — the bigger of the two
+                    # negatives is the smaller-overlap axis (push
+                    # along that one to minimise displacement).
+                    if ox >= 0 or oy >= 0:
+                        continue
+                    if -ox < -oy:
+                        push = -ox + 0.001
+                        total_mass = p_mass + q_mass
+                        share_p = q_mass / total_mass
+                        share_q = p_mass / total_mass
+                        if dx >= 0:
+                            px += push * share_p
+                            qx -= push * share_q
+                        else:
+                            px -= push * share_p
+                            qx += push * share_q
+                    else:
+                        push = -oy + 0.001
+                        total_mass = p_mass + q_mass
+                        share_p = q_mass / total_mass
+                        share_q = p_mass / total_mass
+                        if dy >= 0:
+                            py += push * share_p
+                            qy -= push * share_q
+                        else:
+                            py -= push * share_p
+                            qy += push * share_q
+                    # Clamp into canvas bounds after push.
+                    px = max(pw / 2.0, min(bound_w - pw / 2.0, px))
+                    py = max(ph / 2.0, min(bound_h - ph / 2.0, py))
+                    qx = max(qw / 2.0, min(bound_w - qw / 2.0, qx))
+                    qy = max(qh / 2.0, min(bound_h - qh / 2.0, qy))
+                    self._galaxy_positions[p] = (px, py)
+                    self._galaxy_positions[q] = (qx, qy)
 
     def _galaxy_render_bubble(self, row, bw, bh):
         """Render a single bubble as a list of `bh` strings of width `bw`.

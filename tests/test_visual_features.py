@@ -707,81 +707,90 @@ class TestProcessGalaxy:
              patch.object(monitor, "_put"):
             monitor._galaxy_render_fullscreen(120, 40)
 
-    def test_galaxy_grid_layout_no_overlap_in_row(self, monitor):
-        """Row-fill grid: bubbles in the same row never overlap on
-        the X axis. Heaviest bubble lands first (smaller x); subsequent
-        bubbles are placed at x positions that account for their
-        predecessor's full width."""
+    def test_galaxy_no_pairwise_rectangle_overlap(self, monitor):
+        """Crypto-bubble cluster: no two bubbles are allowed to overlap
+        on screen. The overlap-resolution iterations inside _galaxy_step
+        must push intersecting rectangles apart along their smallest
+        overlap axis. Verified after several solver ticks (the cluster
+        settles within a few iterations)."""
+        import random as _r
+        _r.seed(42)
         monitor._total_mem_kb = 16 * 1024 * 1024
-        # Three active processes that should all fit in one row of a
-        # 120-wide canvas.
+        # A mix of heavy and light bubbles, all spawned near the centre
+        # so initial collisions are guaranteed.
         monitor.rows = [
-            {"pid": 1, "ppid": 0, "agg_cpu": 40.0, "cpu": 40.0,
-             "agg_rss_kb": 100, "rss_kb": 100,
-             "command": "/Applications/A.app/Contents/MacOS/A"},
-            {"pid": 2, "ppid": 0, "agg_cpu": 15.0, "cpu": 15.0,
-             "agg_rss_kb": 100, "rss_kb": 100,
-             "command": "/Applications/B.app/Contents/MacOS/B"},
-            {"pid": 3, "ppid": 0, "agg_cpu": 5.0, "cpu": 5.0,
-             "agg_rss_kb": 100, "rss_kb": 100,
-             "command": "/Applications/C.app/Contents/MacOS/C"},
+            {"pid": i + 1, "ppid": 0,
+             "agg_cpu": 30.0 - i * 2.0,
+             "cpu": 30.0 - i * 2.0,
+             "agg_rss_kb": 100,
+             "rss_kb": 100,
+             "command": f"/Applications/App{i}.app/Contents/MacOS/App{i}"}
+            for i in range(8)
         ]
-        monitor._galaxy_step(120, 30)
-        # Sort by center-x so we can check pairwise non-overlap.
+        # Several settle ticks
+        for _ in range(20):
+            monitor._galaxy_step(140, 40)
+        # Build axis-aligned rectangles and assert no pair overlaps.
         rects = []
         for r in monitor.rows:
             cx, cy = monitor._galaxy_positions[r["pid"]]
             bw, bh = monitor._galaxy_bubble_size(r)
             rects.append((cx - bw / 2.0, cy - bh / 2.0,
                           cx + bw / 2.0, cy + bh / 2.0, r["pid"]))
-        rects.sort(key=lambda t: t[0])
-        for i in range(len(rects) - 1):
-            assert rects[i][2] <= rects[i + 1][0] + 0.001, \
-                f"bubbles {rects[i][4]} and {rects[i + 1][4]} overlap"
+        for i, a in enumerate(rects):
+            for b in rects[i + 1:]:
+                # Two rectangles overlap iff every axis overlaps.
+                ax_overlap = a[2] > b[0] and b[2] > a[0]
+                ay_overlap = a[3] > b[1] and b[3] > a[1]
+                assert not (ax_overlap and ay_overlap), \
+                    f"bubbles {a[4]} and {b[4]} overlap"
 
-    def test_galaxy_grid_wraps_to_new_row_when_full(self, monitor):
-        """When the next bubble doesn't fit in the current row, the
-        layout wraps it to the next row. Verify by packing many heavy
-        bubbles into a narrow canvas and asserting that at least two
-        distinct y-coordinates are produced."""
+    def test_galaxy_floats_freely_in_2d(self, monitor):
+        """Floating cluster: bubbles must occupy more than one row of
+        y-coordinates (i.e. layout is genuinely 2D, not a horizontal
+        line). Was a regression check after the row-fill grid produced
+        single-line layouts that made the user complain."""
+        import random as _r
+        _r.seed(7)
         monitor._total_mem_kb = 16 * 1024 * 1024
-        # 10 heavy bubbles, each 17×5; they can't all fit in 80 cols.
         monitor.rows = [
-            {"pid": i + 1, "ppid": 0, "agg_cpu": 50.0, "cpu": 50.0,
+            {"pid": i + 1, "ppid": 0, "agg_cpu": 5.0, "cpu": 5.0,
              "agg_rss_kb": 100, "rss_kb": 100,
              "command": f"/Applications/App{i}.app/Contents/MacOS/App{i}"}
-            for i in range(10)
+            for i in range(12)
         ]
-        monitor._galaxy_step(80, 40)
+        for _ in range(10):
+            monitor._galaxy_step(160, 32)
         ys = {round(monitor._galaxy_positions[r["pid"]][1])
               for r in monitor.rows}
-        assert len(ys) >= 2, \
-            "expected wrap to a new row when canvas runs out of width"
+        # If everything piled onto one y, the layout is broken.
+        assert len(ys) >= 3, \
+            "bubbles should distribute across multiple y-rows, not one line"
 
-    def test_galaxy_grid_heaviest_lands_top_left(self, monitor):
-        """The bubble with the highest combined load is positioned
-        first (smallest x and y). Heaviest top-left is the canonical
-        crypto-bubble visual hierarchy."""
+    def test_galaxy_drift_moves_bubbles_between_ticks(self, monitor):
+        """The drift mechanic gives bubbles small per-tick velocities
+        so the cluster bobs visibly on camera. Across two consecutive
+        ticks (with no new PIDs) at least one bubble should have moved
+        — otherwise the 'floating' effect doesn't exist."""
+        import random as _r
+        _r.seed(3)
         monitor._total_mem_kb = 16 * 1024 * 1024
         monitor.rows = [
-            {"pid": 1, "ppid": 0, "agg_cpu": 5.0, "cpu": 5.0,
+            {"pid": i + 1, "ppid": 0, "agg_cpu": 5.0, "cpu": 5.0,
              "agg_rss_kb": 100, "rss_kb": 100,
-             "command": "/Applications/Light.app/Contents/MacOS/Light"},
-            {"pid": 2, "ppid": 0, "agg_cpu": 50.0, "cpu": 50.0,
-             "agg_rss_kb": 100, "rss_kb": 100,
-             "command": "/Applications/Heavy.app/Contents/MacOS/Heavy"},
-            {"pid": 3, "ppid": 0, "agg_cpu": 25.0, "cpu": 25.0,
-             "agg_rss_kb": 100, "rss_kb": 100,
-             "command": "/Applications/Mid.app/Contents/MacOS/Mid"},
+             "command": f"/Applications/App{i}.app/Contents/MacOS/App{i}"}
+            for i in range(6)
         ]
-        monitor._galaxy_step(120, 30)
-        heavy_x = monitor._galaxy_positions[2][0]
-        mid_x = monitor._galaxy_positions[3][0]
-        light_x = monitor._galaxy_positions[1][0]
-        # Heaviest is to the left of the others (smaller x in row-fill).
-        assert heavy_x < mid_x < light_x, \
-            f"heaviest should be top-left, got x positions: " \
-            f"heavy={heavy_x}, mid={mid_x}, light={light_x}"
+        monitor._galaxy_step(120, 32)
+        before = {pid: tuple(pos)
+                  for pid, pos in monitor._galaxy_positions.items()}
+        monitor._galaxy_step(120, 32)
+        after = {pid: tuple(pos)
+                 for pid, pos in monitor._galaxy_positions.items()}
+        moved = sum(1 for pid in before
+                    if before[pid] != after.get(pid, before[pid]))
+        assert moved >= 1, \
+            "expected at least one bubble to drift between ticks"
 
     def test_main_render_takes_full_screen_in_galaxy_mode(self):
         """Static check on render() — when _galaxy_mode is true, the
