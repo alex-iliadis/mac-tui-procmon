@@ -1130,6 +1130,71 @@ class TestProcessGalaxy:
         # Maxlen=3 keeps the deque bounded.
         assert len(monitor._galaxy_trails) <= 3
 
+    # ── Feature 8: Pulse animation on heavy bubbles ─────────────────
+
+    def _captured_attrs_for_heavy(self, monitor, phase):
+        """Render fullscreen with a fixed pulse phase and return all
+        captured _put attrs. Heavy bubble has cpu >= 30 to ensure
+        tier-4+."""
+        from unittest.mock import patch
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        monitor._galaxy_mode = True
+        monitor._galaxy_pulse_phase = phase
+        monitor.rows = [
+            {"pid": 1, "ppid": 0,
+             "command": "/Applications/Slack.app/Contents/MacOS/Slack",
+             "cpu": 50.0, "agg_cpu": 50.0,
+             "rss_kb": 2 * 1024 * 1024,
+             "agg_rss_kb": 2 * 1024 * 1024},
+        ]
+        captured = []
+        def fake_put(y, x, text, attr=0):
+            captured.append((y, x, text, attr))
+        # Stub _galaxy_step so it doesn't increment the phase out from
+        # under us (we want to inspect the attr for a known phase).
+        with patch("curses.color_pair", side_effect=lambda n: n << 8), \
+             patch.object(monitor, "_put", side_effect=fake_put), \
+             patch.object(monitor, "_galaxy_step"):
+            # We still need positions populated, so place pid=1 manually.
+            monitor._galaxy_positions[1] = (60.0, 20.0)
+            monitor._galaxy_render_fullscreen(120, 40)
+        return captured
+
+    def test_pulse_phase_bold_when_phase_low(self, monitor):
+        import curses as _curses
+        captured = self._captured_attrs_for_heavy(monitor, phase=0)
+        # Look for any inverse+bold pair flag on a heavy bubble's body.
+        bold_seen = any(
+            (attr & _curses.A_REVERSE) and (attr & _curses.A_BOLD)
+            for _y, _x, _text, attr in captured)
+        assert bold_seen, "heavy bubble should be bold during phase 0"
+
+    def test_pulse_phase_no_bold_when_phase_high(self, monitor):
+        import curses as _curses
+        captured = self._captured_attrs_for_heavy(monitor, phase=4)
+        # During the second half of the cycle, no painted run for a
+        # tier-4 bubble should carry both A_REVERSE and A_BOLD on its
+        # inner fill (inner cells use A_REVERSE; absence of A_BOLD on
+        # inner-fill runs is what we assert).
+        # The inner fill cells share an attr that includes A_REVERSE
+        # but should not include A_BOLD on phase 3..5.
+        # Find at least one A_REVERSE-only run, and also assert there
+        # is at least one painted cell that is reverse-without-bold.
+        no_bold_seen = any(
+            (attr & _curses.A_REVERSE) and not (attr & _curses.A_BOLD)
+            for _y, _x, _text, attr in captured)
+        assert no_bold_seen, \
+            "heavy bubble's inner fill should drop bold during phase 4"
+
+    def test_pulse_phase_increments(self, monitor):
+        monitor.rows = self._make_rows(1)
+        monitor._galaxy_pulse_phase = 0
+        monitor._galaxy_step(60, 20)
+        first = monitor._galaxy_pulse_phase
+        monitor._galaxy_step(60, 20)
+        second = monitor._galaxy_pulse_phase
+        assert second != first, "pulse phase should advance each tick"
+
     def test_aspect_correction_uses_doubled_min_dy(self):
         """Static check: the overlap solver's required vertical
         separation is doubled to compensate for ~2:1 terminal cells."""

@@ -3301,6 +3301,11 @@ class ProcMonUI:
         # Heat trails: a 3-frame ring buffer of past positions so each
         # bubble leaves a fading trail of `·` glyphs as it drifts.
         self._galaxy_trails = collections.deque(maxlen=3)
+        # Heartbeat animation phase counter for tier-4+ bubbles. Cycles
+        # 0..5 — the first half (0,1,2) is bold-fill, the second half
+        # (3,4,5) drops the bold so the bubble pulses on a 3-frame
+        # heartbeat.
+        self._galaxy_pulse_phase = 0
         self._galaxy_known_pids = set()
         self._galaxy_node_cap = 80
         self._galaxy_iter_step = 0.5  # spring step length
@@ -5453,6 +5458,7 @@ class ProcMonUI:
         self._galaxy_glow = {}
         self._galaxy_fork_rings = {}
         self._galaxy_trails = collections.deque(maxlen=3)
+        self._galaxy_pulse_phase = 0
         self._galaxy_known_pids = set()
 
     def _galaxy_select_nodes(self):
@@ -5642,6 +5648,8 @@ class ProcMonUI:
         over.
         """
         import random
+        # Tick the pulse phase counter (0..5, wrapping).
+        self._galaxy_pulse_phase = (self._galaxy_pulse_phase + 1) % 6
         # Heat trail snapshot: capture the positions AT THIS POINT
         # (i.e. the result of the previous tick) so the renderer can
         # draw a fading trail behind each moving bubble. The deque is
@@ -6095,7 +6103,10 @@ class ProcMonUI:
             border_pair = self._GALAXY_TIER_COLORS[tier]
             border_extra = curses.A_BOLD if tier >= 3 else 0
             inner_extra = curses.A_REVERSE
-            if tier >= 4:
+            # Pulse animation on tier-4+ bubbles: bold for 3 frames,
+            # plain reverse for 3 frames, on a 6-tick cycle. Drives a
+            # visible heartbeat on the heavy bubbles only.
+            if tier >= 4 and self._galaxy_pulse_phase < 3:
                 inner_extra |= curses.A_BOLD
             glow = bool(self._galaxy_glow.get(pid))
             if glow:
