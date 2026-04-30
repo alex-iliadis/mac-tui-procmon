@@ -5891,6 +5891,18 @@ class ProcMonUI:
         EMPTY = (" ", 0, 0)
         grid = [[EMPTY for _ in range(body_w)] for _ in range(body_h)]
 
+        # Starfield: deterministic procedural background painted before
+        # bubbles, so visible stars only show in empty regions. Pattern
+        # is keyed on (canvas_x, canvas_y) so it doesn't shimmer between
+        # frames (no random state to manage).
+        for sy in range(body_h):
+            for sx in range(body_w):
+                k = (sx * 73 + sy * 131) & 0xFFFF
+                if k % 17 == 0:
+                    grid[sy][sx] = ("·", 10, curses.A_DIM)
+                elif k % 31 == 0:
+                    grid[sy][sx] = ("⋅", 10, curses.A_DIM)
+
         # Bubbles. In grid-fill mode we don't draw parent-child edges
         # (they'd cross other bubbles awkwardly and detract from the
         # crypto-bubble look). Edges live in the legacy split-view path.

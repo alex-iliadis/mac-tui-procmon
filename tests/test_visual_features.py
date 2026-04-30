@@ -836,3 +836,87 @@ class TestProcessGalaxy:
         node_pids = {n["pid"] for n in nodes}
         assert node_pids == {1, 2}, \
             "parent of an interesting PID should be retained"
+
+    # ── Feature 1: Starfield background ──────────────────────────────
+
+    def _capture_fullscreen(self, monitor, w=120, h=40):
+        """Render the fullscreen galaxy and return a list of
+        (y, x, text, attr) tuples for every painted run."""
+        from unittest.mock import patch
+        captured = []
+
+        def fake_put(y, x, text, attr=0):
+            captured.append((y, x, text, attr))
+
+        with patch("curses.color_pair", side_effect=lambda n: n << 8), \
+             patch.object(monitor, "_put", side_effect=fake_put):
+            monitor._galaxy_render_fullscreen(w, h)
+        return captured
+
+    def test_starfield_paints_dot_glyphs(self, monitor):
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        monitor._galaxy_mode = True
+        # Few small bubbles so most of the canvas is empty.
+        monitor.rows = [
+            {"pid": 1, "ppid": 0, "command": "/usr/bin/x",
+             "cpu": 0.1, "agg_cpu": 0.1,
+             "rss_kb": 100, "agg_rss_kb": 100},
+        ]
+        runs = self._capture_fullscreen(monitor)
+        joined = "\n".join(t for _, _, t, _ in runs)
+        # Stars should appear somewhere on the canvas.
+        assert "·" in joined or "⋅" in joined, \
+            "expected starfield glyphs in the fullscreen render"
+
+    def test_starfield_not_visible_inside_bubble(self, monitor):
+        """A single heavy bubble: the cells inside its bounding box
+        must show bubble glyphs / inverse fill, NOT starfield dots."""
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        monitor._galaxy_mode = True
+        monitor.rows = [
+            {"pid": 1, "ppid": 0,
+             "command": "/Applications/Google Chrome.app/Contents/MacOS/"
+                        "Google Chrome",
+             "cpu": 80.0, "agg_cpu": 80.0,
+             "rss_kb": 2 * 1024 * 1024, "agg_rss_kb": 2 * 1024 * 1024},
+        ]
+        runs = self._capture_fullscreen(monitor)
+
+        # Build a y -> {x: ch} map from every painted run.
+        screen = {}
+        for y, x, text, _ in runs:
+            for i, ch in enumerate(text):
+                screen.setdefault(y, {})[x + i] = ch
+
+        # Find the bubble centre (the position is a float; centre cell
+        # is the one with the box-drawing border).
+        cx, cy = monitor._galaxy_positions[1]
+        bw, bh = monitor._galaxy_bubble_size(monitor.rows[0])
+        x0 = int(cx) - bw // 2
+        y0 = int(cy) - bh // 2
+        # Header occupies row 0 — body starts at row 1.
+        body_y0 = y0 + 1
+        for dy in range(1, bh - 1):  # inner rows only
+            for dx in range(1, bw - 1):
+                ch = screen.get(body_y0 + dy, {}).get(x0 + dx)
+                # Inside a bubble we should NEVER see starfield dots.
+                assert ch != "·" and ch != "⋅", \
+                    f"starfield glyph leaked into bubble at ({dy},{dx})"
+
+    def test_starfield_deterministic(self, monitor):
+        """Same canvas size renders the same star pattern (no shimmer)."""
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        monitor._galaxy_mode = True
+        monitor.rows = []
+        # Two renders back-to-back must produce identical star layouts.
+        runs1 = self._capture_fullscreen(monitor)
+        runs2 = self._capture_fullscreen(monitor)
+        # Extract positions of star glyphs from each render.
+        def stars(runs):
+            out = set()
+            for y, x, text, _ in runs:
+                for i, ch in enumerate(text):
+                    if ch in ("·", "⋅"):
+                        out.add((y, x + i, ch))
+            return out
+        assert stars(runs1) == stars(runs2)
