@@ -5865,6 +5865,31 @@ class ProcMonUI:
         bot = "╰" + "─" * inner_w + "╯"
         return [top] + ["│" + line + "│" for line in inner_lines] + [bot]
 
+    @staticmethod
+    def _galaxy_trend_badge(samples):
+        """Pick a trend glyph from a list of recent CPU samples.
+
+        Compares the median of the newest 3 vs the median of the
+        oldest 3 (out of the last 5 samples). Returns one of:
+          - ('↑', 1)  rising    → green (color pair 1)
+          - ('↓', 5)  falling   → red   (color pair 5)
+          - ('→', 10) flat      → light grey, dim
+          - (None, 0)           if too few samples to call it
+        """
+        if not samples or len(samples) < 5:
+            return (None, 0)
+        last5 = list(samples)[-5:]
+        oldest3 = sorted(last5[:3])
+        newest3 = sorted(last5[-3:])
+        med_old = oldest3[len(oldest3) // 2]
+        med_new = newest3[len(newest3) // 2]
+        delta = med_new - med_old
+        if delta > 2.0:
+            return ("↑", 1)
+        if delta < -2.0:
+            return ("↓", 5)
+        return ("→", 10)
+
     # Vendor → single-cell logo glyph rendered before the bubble's
     # centered name. Emoji widths in curses are unreliable, so we use
     # ASCII-safe glyphs that always occupy exactly one cell.
@@ -6020,6 +6045,21 @@ class ProcMonUI:
                         if anomaly:
                             attr_extra |= curses.A_BLINK
                         grid[row_y][col_x] = (ch, fill_pair, attr_extra)
+
+            # Trend badge: replace the rightmost cell of the top
+            # border with an ↑/↓/→ glyph based on recent CPU history.
+            badge_x = x0 + bw - 1
+            badge_y = y0
+            if 0 <= badge_y < body_h and 0 <= badge_x < body_w:
+                hist = self._metric_history.get(pid)
+                samples = []
+                if hist and hist.get("cpu"):
+                    samples = list(hist["cpu"])
+                glyph, badge_pair = self._galaxy_trend_badge(samples)
+                if glyph:
+                    badge_attr = curses.A_BOLD if glyph in ("↑", "↓") \
+                        else curses.A_DIM
+                    grid[badge_y][badge_x] = (glyph, badge_pair, badge_attr)
 
         # Paint the grid into curses, coalescing adjacent same-attr runs.
         for row_y, row in enumerate(grid):
