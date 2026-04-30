@@ -5859,6 +5859,48 @@ class ProcMonUI:
                     self._galaxy_positions[p] = (px, py)
                     self._galaxy_positions[q] = (qx, qy)
 
+        # 3) Same-vendor attraction. After overlap-resolution settles
+        # the cluster, bias each pair of same-vendor bubbles toward
+        # their midpoint by a small per-tick step IF they're more
+        # than 6 cells apart. This doesn't override the overlap pass
+        # (which runs first); it just lets vendor groups drift toward
+        # each other over many ticks until they bump up against the
+        # next vendor cluster.
+        import math as _vc_math
+        vendors = {r["pid"]: self._galaxy_vendor_label(r) for r in nodes}
+        attract_step = 0.05
+        attract_min_dist = 6.0
+        for i, p in enumerate(node_pids):
+            v_p = vendors[p]
+            if v_p == "unknown":
+                continue
+            px, py = self._galaxy_positions[p]
+            pw, ph = sizes[p]
+            for j in range(i + 1, len(node_pids)):
+                q = node_pids[j]
+                if vendors[q] != v_p:
+                    continue
+                qx, qy = self._galaxy_positions[q]
+                qw, qh = sizes[q]
+                dx = qx - px
+                dy = qy - py
+                dist = _vc_math.hypot(dx, dy)
+                if dist <= attract_min_dist:
+                    continue
+                ux = dx / dist
+                uy = dy / dist
+                px += ux * attract_step
+                py += uy * attract_step
+                qx -= ux * attract_step
+                qy -= uy * attract_step
+                # Clamp into canvas bounds.
+                px = max(pw / 2.0, min(bound_w - pw / 2.0, px))
+                py = max(ph / 2.0, min(bound_h - ph / 2.0, py))
+                qx = max(qw / 2.0, min(bound_w - qw / 2.0, qx))
+                qy = max(qh / 2.0, min(bound_h - qh / 2.0, qy))
+                self._galaxy_positions[p] = (px, py)
+                self._galaxy_positions[q] = (qx, qy)
+
     def _galaxy_render_bubble(self, row, bw, bh):
         """Render a single bubble as a list of `bh` strings of width `bw`.
 

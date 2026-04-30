@@ -1429,6 +1429,68 @@ class TestProcessGalaxy:
         assert "42" in card_text
         assert "Enter" in card_text
 
+    # ── Feature 12: Vendor clustering ───────────────────────────────
+
+    def test_same_vendor_drift_toward_each_other(self, monitor):
+        """After many ticks the average pairwise distance between
+        same-vendor bubbles should be lower than the average pairwise
+        distance across all bubbles."""
+        import random as _r
+        import math
+        _r.seed(13)
+        monitor._total_mem_kb = 16 * 1024 * 1024
+        rows = []
+        # 4 google + 4 apple + 2 slack
+        for i in range(4):
+            rows.append({
+                "pid": 100 + i, "ppid": 0,
+                "command": "/Applications/Google Chrome.app/Contents/MacOS/"
+                           "Google Chrome",
+                "cpu": 5.0, "agg_cpu": 5.0,
+                "rss_kb": 1024, "agg_rss_kb": 1024})
+        for i in range(4):
+            rows.append({
+                "pid": 200 + i, "ppid": 0,
+                "command": "/usr/bin/zsh",
+                "cpu": 5.0, "agg_cpu": 5.0,
+                "rss_kb": 1024, "agg_rss_kb": 1024})
+        for i in range(2):
+            rows.append({
+                "pid": 300 + i, "ppid": 0,
+                "command": "/Applications/Slack.app/Contents/MacOS/Slack",
+                "cpu": 5.0, "agg_cpu": 5.0,
+                "rss_kb": 1024, "agg_rss_kb": 1024})
+        monitor.rows = rows
+        for _ in range(40):
+            monitor._galaxy_step(160, 50)
+
+        def _vendor(r):
+            return monitor._galaxy_vendor_label(r)
+
+        positions = {r["pid"]: monitor._galaxy_positions[r["pid"]]
+                     for r in rows}
+        vmap = {r["pid"]: _vendor(r) for r in rows}
+
+        same_dists = []
+        all_dists = []
+        pids = list(positions.keys())
+        for i in range(len(pids)):
+            for j in range(i + 1, len(pids)):
+                p1 = pids[i]; p2 = pids[j]
+                d = math.hypot(
+                    positions[p1][0] - positions[p2][0],
+                    positions[p1][1] - positions[p2][1])
+                all_dists.append(d)
+                if vmap[p1] == vmap[p2] and vmap[p1] != "unknown":
+                    same_dists.append(d)
+
+        assert same_dists, "expected same-vendor pairs"
+        avg_same = sum(same_dists) / len(same_dists)
+        avg_all = sum(all_dists) / len(all_dists)
+        assert avg_same < avg_all, (
+            f"same-vendor avg ({avg_same:.2f}) should be tighter "
+            f"than overall avg ({avg_all:.2f})")
+
     def test_aspect_correction_uses_doubled_min_dy(self):
         """Static check: the overlap solver's required vertical
         separation is doubled to compensate for ~2:1 terminal cells."""
