@@ -5938,6 +5938,26 @@ class ProcMonUI:
             return " " * left + text + " " * right
 
         inner_w = max(1, bw - 2)
+
+        def _cpu_label(cpu_val, width):
+            """Render the CPU% line; for tier-4+ bubbles (width ≥ 13)
+            it becomes an animated load bar `[██████░░░] 47%` filled
+            proportionally to CPU% (clamped to 100). Smaller bubbles
+            keep the plain `47%` form."""
+            pct = max(0.0, min(100.0, float(cpu_val)))
+            pct_str = f"{int(round(pct)):3d}%"
+            # Need: "[" + bar + "]" + " " + pct_str → width
+            #       1   bar   1     1    4  = bar + 7 cells
+            bar_w = width - 7
+            if bar_w < 5:
+                # Not enough room for a meaningful bar; fall back to
+                # the original centered percent label.
+                return _center(f"{int(round(pct))}%", width)
+            filled = int(round((pct / 100.0) * bar_w))
+            filled = max(0, min(bar_w, filled))
+            bar = "█" * filled + "░" * (bar_w - filled)
+            return f"[{bar}] {pct_str}"
+
         # Build the inner content lines (between the top/bottom borders).
         inner_lines = []
         if bh <= 3:
@@ -5948,7 +5968,7 @@ class ProcMonUI:
         else:
             # bh >= 5: name, cpu, rss
             inner_lines.append(_center(name, inner_w))
-            inner_lines.append(_center(f"{cpu:.0f}%", inner_w))
+            inner_lines.append(_cpu_label(cpu, inner_w))
             if rss_kb >= 1024 * 1024:
                 rss_label = f"{rss_kb / (1024 * 1024):.1f}G"
             elif rss_kb >= 1024:
