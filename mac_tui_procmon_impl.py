@@ -3294,6 +3294,10 @@ class ProcMonUI:
         self._galaxy_positions = {}   # pid -> (x: float, y: float)
         self._galaxy_velocity = {}    # pid -> (vx: float, vy: float)
         self._galaxy_glow = {}        # pid -> frames_remaining for fork glow
+        # Expanding-ring effect on newly-spotted PIDs. Maps pid → number
+        # of frames since the bubble was first seen (0..5). When the
+        # counter exceeds 5, the entry is popped.
+        self._galaxy_fork_rings = {}
         self._galaxy_known_pids = set()
         self._galaxy_node_cap = 80
         self._galaxy_iter_step = 0.5  # spring step length
@@ -5444,6 +5448,7 @@ class ProcMonUI:
         self._galaxy_positions = {}
         self._galaxy_velocity = {}
         self._galaxy_glow = {}
+        self._galaxy_fork_rings = {}
         self._galaxy_known_pids = set()
 
     def _galaxy_select_nodes(self):
@@ -5641,6 +5646,10 @@ class ProcMonUI:
         for pid in node_pids:
             if pid not in self._galaxy_known_pids:
                 self._galaxy_glow[pid] = 6
+                # Fork ring counter starts at 0; advances with each
+                # tick so the renderer can draw expanding concentric
+                # rings around the newly-born bubble.
+                self._galaxy_fork_rings[pid] = 0
         for pid in list(self._galaxy_glow.keys()):
             if pid not in node_set:
                 self._galaxy_glow.pop(pid, None)
@@ -5649,6 +5658,15 @@ class ProcMonUI:
                 self._galaxy_glow[pid] -= 1
             else:
                 self._galaxy_glow.pop(pid, None)
+        # Advance fork ring counters; pop after 5 frames or if the PID
+        # disappears entirely.
+        for pid in list(self._galaxy_fork_rings.keys()):
+            if pid not in node_set:
+                self._galaxy_fork_rings.pop(pid, None)
+                continue
+            self._galaxy_fork_rings[pid] += 1
+            if self._galaxy_fork_rings[pid] > 5:
+                self._galaxy_fork_rings.pop(pid, None)
         self._galaxy_known_pids = node_set
 
         # Drop positions/velocities for PIDs that left the snapshot.
@@ -5989,6 +6007,39 @@ class ProcMonUI:
                     grid[sy][sx] = ("·", 10, curses.A_DIM)
                 elif k % 31 == 0:
                     grid[sy][sx] = ("⋅", 10, curses.A_DIM)
+
+        # Fork-ring pulse: for each newly-spotted PID, draw an
+        # expanding concentric ring of `·` glyphs that grows by one
+        # cell per frame for 5 frames, then fades and is popped. We
+        # paint these BEFORE the bubbles so the ring appears around
+        # (not inside) each bubble.
+        import math as _ring_math
+        for r in nodes:
+            ring_pid = r["pid"]
+            frames = self._galaxy_fork_rings.get(ring_pid)
+            if frames is None or frames > 5:
+                continue
+            pos = self._galaxy_positions.get(ring_pid)
+            if pos is None:
+                continue
+            cx_r, cy_r = pos
+            bw_r, bh_r = self._galaxy_bubble_size(r)
+            half = max(bw_r, bh_r * 2) // 2  # diagonal-ish half size
+            radius = half + frames
+            ring_extra = curses.A_BOLD if frames < 3 else curses.A_DIM
+            # Sweep around the ring; quantise to grid cells.
+            steps = max(8, int(2 * _ring_math.pi * radius))
+            seen = set()
+            for s in range(steps):
+                ang = (2 * _ring_math.pi) * s / steps
+                # Compress y by 2 to compensate for terminal aspect.
+                rx = int(round(cx_r + radius * _ring_math.cos(ang)))
+                ry = int(round(cy_r + (radius / 2.0) * _ring_math.sin(ang)))
+                if (rx, ry) in seen:
+                    continue
+                seen.add((rx, ry))
+                if 0 <= ry < body_h and 0 <= rx < body_w:
+                    grid[ry][rx] = ("·", 3, ring_extra)
 
         # Bubbles. In grid-fill mode we don't draw parent-child edges
         # (they'd cross other bubbles awkwardly and detract from the

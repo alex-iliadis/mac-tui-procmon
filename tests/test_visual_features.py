@@ -1078,6 +1078,38 @@ class TestProcessGalaxy:
         joined = "".join(t for _, _, t, _ in captured)
         assert "↑" in joined, "expected up-trend badge for rising CPU"
 
+    # ── Feature 6: Fork ring pulse ──────────────────────────────────
+
+    def test_fork_ring_populated_for_new_pid(self, monitor):
+        monitor.rows = self._make_rows(3)
+        monitor._galaxy_step(60, 20)
+        for r in monitor.rows:
+            assert r["pid"] in monitor._galaxy_fork_rings
+
+    def test_fork_ring_advances_each_tick(self, monitor):
+        monitor.rows = self._make_rows(2)
+        monitor._galaxy_step(60, 20)
+        first = dict(monitor._galaxy_fork_rings)
+        monitor._galaxy_step(60, 20)
+        for pid, start in first.items():
+            assert monitor._galaxy_fork_rings.get(pid, -1) > start
+
+    def test_fork_ring_pops_after_six_ticks(self, monitor):
+        monitor.rows = self._make_rows(2)
+        monitor._galaxy_step(60, 20)
+        # Need to keep the same pids alive for 6 more ticks.
+        for _ in range(6):
+            monitor._galaxy_step(60, 20)
+        assert monitor._galaxy_fork_rings == {}
+
+    def test_fork_ring_dropped_when_pid_disappears(self, monitor):
+        monitor.rows = self._make_rows(3)
+        monitor._galaxy_step(60, 20)
+        # Drop pid 2 entirely.
+        monitor.rows = [r for r in monitor.rows if r["pid"] != 2]
+        monitor._galaxy_step(60, 20)
+        assert 2 not in monitor._galaxy_fork_rings
+
     def test_aspect_correction_uses_doubled_min_dy(self):
         """Static check: the overlap solver's required vertical
         separation is doubled to compensate for ~2:1 terminal cells."""

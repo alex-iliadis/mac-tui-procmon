@@ -232,6 +232,7 @@ def monitor():
     mon._galaxy_positions = {}
     mon._galaxy_velocity = {}
     mon._galaxy_glow = {}
+    mon._galaxy_fork_rings = {}
     mon._galaxy_known_pids = set()
     mon._galaxy_node_cap = 80
     mon._galaxy_iter_step = 0.5
