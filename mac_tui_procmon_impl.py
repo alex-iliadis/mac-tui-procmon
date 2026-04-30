@@ -6394,105 +6394,13 @@ class ProcMonUI:
         rank_badges = {ranked[i]["pid"]: ("①②③"[i] if i < 3 else None)
                        for i in range(min(3, len(ranked)))}
 
-        # ── Living-galaxy effect 1/4: smooth Braille nebula halos ────
-        # Each bubble emits a glowing radial cloud of Braille dots in
-        # its vendor color. Each terminal cell maps to a 2×4 grid of
-        # 8 Braille sub-pixels; we light a number of those sub-pixels
-        # proportional to the cell's distance from the bubble's edge,
-        # producing a smooth density gradient instead of three
-        # discrete rings. Result: the cluster looks like glowing
-        # nebulae, not dotted boxes.
-        #
-        # Braille glyph at code point 0x2800 + bitmask of dots:
-        #   1 4
-        #   2 5
-        #   3 6
-        #   7 8
-        # We pre-compute a 9-step density ladder (0..8 dots ON), each
-        # picked to spread the active dots evenly so dim levels look
-        # like sparse dots, not concentrated patches.
-        # 0:_  1:⠁  2:⠉  3:⠋  4:⠛  5:⠟  6:⠿  7:⡿  8:⣿
-        BRAILLE_DENSITY = [
-            "⠀",  # 0 dots
-            "⠁",  # 1
-            "⠉",  # 2
-            "⠋",  # 3
-            "⠛",  # 4
-            "⠟",  # 5
-            "⠿",  # 6
-            "⡿",  # 7
-            "⣿",  # 8
-        ]
-        # Pre-compute aspect ratio: terminal cells are ~2× tall as wide,
-        # so y-distance counts double. Halo radius scales with bubble
-        # size — heavy bubbles glow further into the canvas.
-        for _area, r, bw, bh in sized:
-            pid = r["pid"]
-            pos = self._galaxy_positions.get(pid)
-            if pos is None:
-                continue
-            x, y = pos
-            x0 = int(x) - bw // 2
-            y0 = int(y) - bh // 2
-            x0 = max(0, min(body_w - bw, x0))
-            y0 = max(0, min(body_h - bh, y0))
-            vendor = self._galaxy_vendor_label(r)
-            tier = self._galaxy_load_tier(r, total_mem)
-            halo_pair = self._GALAXY_VENDOR_COLORS.get(
-                vendor, self._GALAXY_TIER_COLORS[tier])
-            # Scale halo radius with bubble size + tier so heavy
-            # bubbles outshine lighter ones (dominant processes have
-            # bigger gravitational well of light).
-            halo_extra_w = 4 + tier  # 4..8 cells of horizontal glow
-            halo_extra_h = 2 + (tier // 2)  # 2..4 of vertical glow
-            cx_b = x0 + bw / 2.0
-            cy_b = y0 + bh / 2.0
-            # Iterate over the bounding region of the halo and paint
-            # each cell with a density-mapped Braille glyph.
-            y_lo = max(0, int(y0) - halo_extra_h)
-            y_hi = min(body_h, int(y0) + bh + halo_extra_h)
-            x_lo = max(0, int(x0) - halo_extra_w)
-            x_hi = min(body_w, int(x0) + bw + halo_extra_w)
-            half_bw = bw / 2.0
-            half_bh = bh / 2.0
-            for cy in range(y_lo, y_hi):
-                for cx in range(x_lo, x_hi):
-                    # Distance from this cell to the nearest point on
-                    # the bubble's border (rectangle distance, with y
-                    # weighted 2× for terminal aspect).
-                    dx = max(0.0, abs(cx + 0.5 - cx_b) - half_bw)
-                    dy = max(0.0, abs(cy + 0.5 - cy_b) - half_bh) * 2.0
-                    d = (dx * dx + dy * dy) ** 0.5
-                    # Inside the bubble (d == 0): skip — the bubble
-                    # paints its own interior. Beyond max radius: skip.
-                    max_r = max(halo_extra_w, halo_extra_h * 2)
-                    if d == 0.0 or d > max_r:
-                        continue
-                    # Smooth falloff: density goes 8 at d=0.5 to 0
-                    # at d=max_r.
-                    intensity = 1.0 - (d / max_r)
-                    intensity = max(0.0, min(1.0, intensity))
-                    density = int(round(intensity * 8))
-                    if density <= 0:
-                        continue
-                    # Don't overpaint bubble cells.
-                    ch_existing = grid[cy][cx][0]
-                    if ch_existing in ("╭", "╮", "╰", "╯",
-                                        "─", "│",
-                                        "╔", "╗", "╚", "╝",
-                                        "═", "║"):
-                        continue
-                    glyph = BRAILLE_DENSITY[density]
-                    extra = curses.A_BOLD if density >= 6 else (
-                        0 if density >= 3 else curses.A_DIM)
-                    # If a brighter halo already painted this cell,
-                    # don't dim it (closer-bubble wins at boundaries).
-                    cur = grid[cy][cx]
-                    cur_ch = cur[0]
-                    if (cur_ch and "⠀" <= cur_ch <= "⣿"
-                            and cur[2] >= extra):
-                        continue
-                    grid[cy][cx] = (glyph, halo_pair, extra)
+        # No halo. Earlier iterations tried both discrete colored
+        # rings and smooth Braille gradients; both ended up looking
+        # like noisy multi-color dust around the bubbles, competing
+        # with the bubble's own brand color and trend cells for
+        # attention. Cleaner: bubbles sit on the starfield and let
+        # the vendor color live INSIDE the box. Pulse waves and
+        # energy streams (below) carry the dynamic color outside.
 
         for _area, r, bw, bh in sized:
             pid = r["pid"]

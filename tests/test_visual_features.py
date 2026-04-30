@@ -1644,12 +1644,12 @@ class TestProcessGalaxy:
         assert "▒" not in joined, \
             "▒ drop-shadow glyph must not appear after the halo replacement"
 
-    def test_vendor_halo_paints_braille_density_around_bubble(self,
-                                                                monitor):
-        """The halo is rendered as a smooth radial gradient of Braille
-        dots at variable density. Cells closer to the bubble carry a
-        denser glyph (more dots set), further cells carry sparser ones.
-        Assert that both kinds appear around a single bubble."""
+    def test_no_vendor_halo_around_bubbles(self, monitor):
+        """The vendor halo (whether Braille gradient, discrete colored
+        rings, or grey drop shadows) was visually noisy. Final state:
+        bubbles sit on the starfield without a colored corona at all.
+        Regression guard against any of the previous halo styles
+        sneaking back in around an isolated bubble."""
         monitor._total_mem_kb = 16 * 1024 * 1024
         monitor._galaxy_mode = True
         monitor.rows = [
@@ -1660,16 +1660,17 @@ class TestProcessGalaxy:
         ]
         runs = self._capture_fullscreen(monitor, w=120, h=30)
         joined = "".join(t for _, _, t, _ in runs)
-        # Braille range: U+2800..U+28FF. We want at least two distinct
-        # density levels visible (sparse + dense).
-        braille = {ch for ch in joined if "⠀" <= ch <= "⣿"}
-        assert len(braille) >= 2, \
-            f"halo should use at least 2 Braille density levels, got {braille}"
-        # Old discrete ring glyphs are gone.
+        # Discrete-ring halo glyphs are gone.
         assert "◆" not in joined
-        assert "+" not in joined or " + " in joined  # `+` may appear in totals
-        # No drop-shadow regression.
+        # Drop-shadow regression still holds.
         assert "▒" not in joined
+        # Braille gradient halos are gone — only Braille glyphs that
+        # could appear are sparkline rows inside heavy bubbles, which
+        # this test fixture (mid-tier 11×3 bubble) is too small to
+        # have. Spot-check that no Braille density blocks are present.
+        for ch in ("⠁", "⠉", "⠋", "⠛", "⠟", "⠿", "⡿", "⣿"):
+            assert ch not in joined, \
+                f"halo glyph {ch!r} should not appear around bubbles"
 
     def test_pulse_wave_paints_ring_when_active(self, monitor):
         """When `_galaxy_pulse_wave_age` is in [0, 6], a ring of
