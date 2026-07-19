@@ -1,0 +1,105 @@
+#!/bin/bash
+# Test and publish main, then fast-forward the MacBook's runnable checkout.
+
+set -euo pipefail
+
+SHIP_SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+SHIP_SOURCE_REPO="$(cd "$SHIP_SCRIPT_DIR/.." && pwd -P)"
+SHIP_LOCAL_COPY="${MAC_TUI_PROCMON_LOCAL_COPY:-${HOME:?HOME must be set}/code/mac-tui-procmon}"
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/ship [--local-copy PATH]
+
+Runs the full test suite, pushes the current main commit to origin/main, and
+then fast-forwards the local MacBook checkout. The checkout defaults to
+$HOME/code/mac-tui-procmon and can also be set with
+MAC_TUI_PROCMON_LOCAL_COPY.
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --local-copy)
+      if [ "$#" -lt 2 ]; then
+        echo "ship: --local-copy requires a path" >&2
+        exit 2
+      fi
+      SHIP_LOCAL_COPY="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "ship: unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [ ! -d "$SHIP_LOCAL_COPY" ]; then
+  echo "ship: local copy not found: $SHIP_LOCAL_COPY" >&2
+  exit 3
+fi
+SHIP_LOCAL_COPY="$(cd "$SHIP_LOCAL_COPY" && pwd -P)"
+
+if [ "$(git -C "$SHIP_SOURCE_REPO" branch --show-current)" != "main" ]; then
+  echo "ship: source checkout must be on main" >&2
+  exit 4
+fi
+
+if [ -n "$(git -C "$SHIP_SOURCE_REPO" status --porcelain --untracked-files=no)" ]; then
+  echo "ship: source checkout has uncommitted tracked changes" >&2
+  exit 5
+fi
+
+if ! git -C "$SHIP_LOCAL_COPY" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  echo "ship: local copy is not a Git checkout: $SHIP_LOCAL_COPY" >&2
+  exit 6
+fi
+
+if [ "$(git -C "$SHIP_LOCAL_COPY" branch --show-current)" != "main" ]; then
+  echo "ship: local copy must be on main: $SHIP_LOCAL_COPY" >&2
+  exit 7
+fi
+
+if [ -n "$(git -C "$SHIP_LOCAL_COPY" status --porcelain --untracked-files=no)" ]; then
+  echo "ship: local copy has uncommitted tracked changes: $SHIP_LOCAL_COPY" >&2
+  exit 8
+fi
+
+echo "==> Fetching origin/main"
+git -C "$SHIP_SOURCE_REPO" fetch origin main
+
+if ! git -C "$SHIP_SOURCE_REPO" merge-base --is-ancestor origin/main HEAD; then
+  echo "ship: origin/main contains commits not present in local main" >&2
+  echo "ship: fast-forward or rebase before shipping" >&2
+  exit 9
+fi
+
+if ! command -v pytest >/dev/null 2>&1; then
+  echo "ship: pytest is required" >&2
+  exit 10
+fi
+
+echo "==> Running full test suite"
+(cd "$SHIP_SOURCE_REPO" && pytest -q)
+
+echo "==> Pushing main"
+git -C "$SHIP_SOURCE_REPO" push origin HEAD:main
+
+echo "==> Updating MacBook copy: $SHIP_LOCAL_COPY"
+git -C "$SHIP_LOCAL_COPY" fetch origin main
+git -C "$SHIP_LOCAL_COPY" merge --ff-only origin/main
+
+SHIP_SOURCE_HEAD="$(git -C "$SHIP_SOURCE_REPO" rev-parse HEAD)"
+SHIP_LOCAL_HEAD="$(git -C "$SHIP_LOCAL_COPY" rev-parse HEAD)"
+if [ "$SHIP_SOURCE_HEAD" != "$SHIP_LOCAL_HEAD" ]; then
+  echo "ship: local copy did not reach shipped commit $SHIP_SOURCE_HEAD" >&2
+  exit 11
+fi
+
+echo "==> Shipped and updated MacBook copy at ${SHIP_SOURCE_HEAD:0:7}"

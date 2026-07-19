@@ -32,6 +32,18 @@ boundary so it runs in <10s without any real macOS APIs:
     --cov-report=term-missing
 ```
 
+## Shipping
+
+```bash
+scripts/ship
+```
+
+The ship command fetches `origin/main`, refuses a non-fast-forward or dirty
+tracked checkout, runs the full test suite, pushes `main`, and then
+fast-forwards the MacBook's runnable checkout. That checkout defaults to
+`$HOME/code/mac-tui-procmon`; override it with `--local-copy PATH` or the
+`MAC_TUI_PROCMON_LOCAL_COPY` environment variable.
+
 ## Coverage
 
 | Target                       | Statements | Cover |
