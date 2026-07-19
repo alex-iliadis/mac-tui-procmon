@@ -43,6 +43,7 @@ class TestInit:
         assert mon.patterns == ["test"]
         assert mon.interval == 5.0
         assert mon.skip_fd is False
+        assert mon.sort_mode == procmon.SORT_CPU
         assert mon._alert_count == 0
 
     def test_init_no_name(self):

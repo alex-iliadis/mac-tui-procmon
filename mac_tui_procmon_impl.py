@@ -3068,7 +3068,7 @@ class ProcMonUI:
         self._metric_history_max_age = 300  # seconds
         self._metric_history_seen = {}   # pid -> last-seen monotonic time
         self._metric_history_max = 60    # samples per metric per pid
-        self.sort_mode = SORT_MEM
+        self.sort_mode = SORT_CPU
         self._sort_inverted = False
         self._dynamic_sort = False  # threshold-exceeding processes bubble to top
         self._vendor_grouped = False  # group processes by vendor at top level
