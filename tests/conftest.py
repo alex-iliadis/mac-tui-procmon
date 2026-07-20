@@ -57,6 +57,7 @@ def monitor():
     mon._metric_history_max = 60
     mon.sort_mode = procmon.SORT_MEM
     mon._sort_inverted = False
+    mon._follow_sort_top = True
     mon._dynamic_sort = False
     mon._vendor_grouped = False
     mon._prev_cpu = {}

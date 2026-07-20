@@ -3072,6 +3072,7 @@ class ProcMonUI:
         self._metric_history_max = 60    # samples per metric per pid
         self.sort_mode = SORT_CPU
         self._sort_inverted = False
+        self._follow_sort_top = True
         self._dynamic_sort = False  # threshold-exceeding processes bubble to top
         self._vendor_grouped = False  # group processes by vendor at top level
         self._prev_cpu = {}  # pid -> (cpu_ns, monotonic_time)
@@ -5099,6 +5100,10 @@ class ProcMonUI:
                 return True
 
         # Main process list has focus
+        navigation_key = key in (
+            curses.KEY_UP, curses.KEY_DOWN,
+            curses.KEY_PPAGE, curses.KEY_NPAGE,
+        )
         if key == curses.KEY_UP and self.selected > 0:
             self.selected -= 1
         elif key == curses.KEY_DOWN and self.selected < len(self.rows) - 1:
@@ -5198,6 +5203,13 @@ class ProcMonUI:
                 return False
         elif key == ord("q"):
             return False
+        if navigation_key:
+            # Row zero means "follow the hottest process." Navigating away
+            # disables that behavior so the operator can inspect one PID;
+            # navigating back to the top re-enables it.
+            self._follow_sort_top = self.selected == 0
+            if self._follow_sort_top:
+                self.scroll_offset = 0
         return True
 
     def _collapse_selected(self):
@@ -11896,13 +11908,12 @@ class ProcMonUI:
                         collected = True
                     except MemoryError:
                         pass
-                if collected and first_timed_refresh:
-                    # The startup render has no CPU delta yet, so its selected
-                    # PID is arbitrary. After the first measured CPU sort,
-                    # select and reveal the actual top row. Later refreshes
-                    # continue preserving the operator's selected process.
+                if collected and getattr(self, "_follow_sort_top", True):
+                    # Keep the cursor on the current sorted leader until the
+                    # operator deliberately navigates away from row zero.
                     self.selected = 0
                     self.scroll_offset = 0
+                if collected and first_timed_refresh:
                     first_timed_refresh = False
                 self._check_alerts()
                 self.render()

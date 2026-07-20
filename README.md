@@ -511,6 +511,10 @@ python3 mac_tui_procmon.py [name] [-i SECONDS] [--no-fd] [--skip-preflight]
 | `--no-fd`            | Skip FD counting for faster updates               |
 | `--skip-preflight`   | Skip external-tool dependency check               |
 
+The cursor follows the current top-ranked process as CPU samples refresh. Move
+Down or Page Down to inspect a specific process; return to row zero to resume
+following the sorted leader.
+
 That's the entire flag set. Host-wide auditing, baseline capture,
 and full security scans are intentionally not here — they live in
 [`mac-system-security`](https://github.com/alex-iliadis/mac-system-security):

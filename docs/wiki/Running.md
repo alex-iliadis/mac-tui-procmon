@@ -52,6 +52,10 @@ youruser ALL=(root) NOPASSWD: /usr/local/sbin/mac-tui-procmon-sudo *
 | `--no-fd`             | Skip file-descriptor counting (faster)         |
 | `--skip-preflight`    | Skip external-tool dependency check            |
 
+On the main list, row zero follows the current sorting leader across refreshes.
+Navigating away preserves the selected process; navigating back to row zero
+resumes following the leader and keeps it visible at the top.
+
 That's the whole flag set. Host-wide auditing, baseline capture,
 and full security scans are intentionally not here — they live in
 [`mac-system-security`](https://github.com/alex-iliadis/mac-system-security):

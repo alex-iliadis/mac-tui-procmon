@@ -890,7 +890,7 @@ class TestRunLoop:
         assert render.call_count == 2
         assert alerts.call_count == 2
         assert positions_at_collection == [(4, 3), (0, 0)]
-        assert (monitor.selected, monitor.scroll_offset) == (2, 1)
+        assert (monitor.selected, monitor.scroll_offset) == (0, 0)
 
 
 # ── get_net_snapshot ────────────────────────────────────────────────────

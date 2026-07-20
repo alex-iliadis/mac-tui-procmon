@@ -86,8 +86,22 @@ class TestNavigationMain:
     def test_page_up_clamps_to_top(self, monitor):
         monitor.rows = _rows()
         monitor.selected = 1
+        monitor._follow_sort_top = False
+        monitor.scroll_offset = 1
         monitor.handle_input(curses.KEY_PPAGE)
         assert monitor.selected == 0
+        assert monitor.scroll_offset == 0
+        assert monitor._follow_sort_top is True
+
+    def test_navigation_away_from_top_stops_following_sort_leader(self, monitor):
+        monitor.rows = _rows()
+        monitor.selected = 0
+        monitor._follow_sort_top = True
+
+        monitor.handle_input(curses.KEY_DOWN)
+
+        assert monitor.selected == 1
+        assert monitor._follow_sort_top is False
 
     def test_left_collapses(self, monitor):
         parent = make_proc(pid=1)
