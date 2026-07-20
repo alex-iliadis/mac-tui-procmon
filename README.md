@@ -507,7 +507,7 @@ python3 mac_tui_procmon.py [name] [-i SECONDS] [--no-fd] [--skip-preflight]
 | Argument             | Description                                       |
 |----------------------|---------------------------------------------------|
 | `name`               | Process name filter (case-insensitive substring)  |
-| `-i`, `--interval`   | Refresh interval in seconds (default: 5)          |
+| `-i`, `--interval`   | Refresh interval in seconds (default: 2; first CPU sample after 1 second) |
 | `--no-fd`            | Skip FD counting for faster updates               |
 | `--skip-preflight`   | Skip external-tool dependency check               |
 

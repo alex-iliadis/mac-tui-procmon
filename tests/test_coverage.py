@@ -865,6 +865,33 @@ class TestRunLoop:
              patch("time.monotonic", side_effect=fake_monotonic):
             monitor.run()
 
+    def test_first_refresh_after_one_second_then_uses_interval(self, monitor):
+        monitor.interval = 2.0
+        monitor.selected = 4
+        monitor.scroll_offset = 3
+        monitor.stdscr.getch.side_effect = [-1, -1, -1, -1, ord("q")]
+        positions_at_collection = []
+
+        def collect_data():
+            positions_at_collection.append(
+                (monitor.selected, monitor.scroll_offset))
+            if len(positions_at_collection) == 2:
+                monitor.selected = 2
+                monitor.scroll_offset = 1
+
+        with patch.object(
+                monitor, "collect_data", side_effect=collect_data) as collect, \
+             patch.object(monitor, "render") as render, \
+             patch.object(monitor, "_check_alerts") as alerts, \
+             patch("time.monotonic", side_effect=[0.5, 1.0, 2.0, 3.0]):
+            monitor._run_loop(last_refresh=0.0)
+
+        assert collect.call_count == 2
+        assert render.call_count == 2
+        assert alerts.call_count == 2
+        assert positions_at_collection == [(4, 3), (0, 0)]
+        assert (monitor.selected, monitor.scroll_offset) == (2, 1)
+
 
 # ── get_net_snapshot ────────────────────────────────────────────────────
 

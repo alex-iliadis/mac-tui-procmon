@@ -48,7 +48,7 @@ youruser ALL=(root) NOPASSWD: /usr/local/sbin/mac-tui-procmon-sudo *
 | Flag                  | Effect                                         |
 |-----------------------|------------------------------------------------|
 | `name` (positional)   | Process-name substring filter                  |
-| `-i / --interval SECS`| Refresh interval (default 5)                   |
+| `-i / --interval SECS`| Refresh interval (default 2; first CPU sample after 1 second) |
 | `--no-fd`             | Skip file-descriptor counting (faster)         |
 | `--skip-preflight`    | Skip external-tool dependency check            |
 

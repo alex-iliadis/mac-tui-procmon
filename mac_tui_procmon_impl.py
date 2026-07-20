@@ -38,6 +38,8 @@ SORT_BYTES_OUT = "O"
 SORT_VENDOR = "V"
 SORT_ALPHA = "A"
 SORT_DYNAMIC = "d"
+DEFAULT_REFRESH_INTERVAL = 2.0
+INITIAL_REFRESH_INTERVAL = 1.0
 _HEADLESS_PROGRESS_LOCK = threading.Lock()
 
 
@@ -11831,6 +11833,8 @@ class ProcMonUI:
                 pass
 
     def _run_loop(self, last_refresh):
+        refresh_delay = min(INITIAL_REFRESH_INTERVAL, self.interval)
+        first_timed_refresh = True
         while True:
             if self._maybe_run_test_action():
                 self.render()
@@ -11877,9 +11881,11 @@ class ProcMonUI:
                 self.render()
 
             now = time.monotonic()
-            if now - last_refresh >= self.interval:
+            if now - last_refresh >= refresh_delay:
+                collected = False
                 try:
                     self.collect_data()
+                    collected = True
                     # Auto-refresh net view if open (non-blocking)
                     if self._net_mode and self._net_pid:
                         self._start_net_refresh()
@@ -11887,11 +11893,24 @@ class ProcMonUI:
                     gc.collect()
                     try:
                         self.collect_data()
+                        collected = True
                     except MemoryError:
                         pass
+                if collected and first_timed_refresh:
+                    # The startup render has no CPU delta yet, so its selected
+                    # PID is arbitrary. After the first measured CPU sort,
+                    # select and reveal the actual top row. Later refreshes
+                    # continue preserving the operator's selected process.
+                    self.selected = 0
+                    self.scroll_offset = 0
+                    first_timed_refresh = False
                 self._check_alerts()
                 self.render()
                 last_refresh = now
+                refresh_delay = (
+                    self.interval if not first_timed_refresh
+                    else min(INITIAL_REFRESH_INTERVAL, self.interval)
+                )
 
 
 def main():
@@ -11905,8 +11924,10 @@ def main():
     )
     parser.add_argument("name", nargs="?", default="",
                         help="Process name to match (case-insensitive substring; omit to monitor all)")
-    parser.add_argument("-i", "--interval", type=float, default=5.0,
-                        help="Refresh interval in seconds (default: 5)")
+    parser.add_argument(
+        "-i", "--interval", type=float, default=DEFAULT_REFRESH_INTERVAL,
+        help="Refresh interval in seconds (default: 2; first sample: 1)",
+    )
     parser.add_argument("--no-fd", action="store_true",
                         help="Skip file descriptor counting (faster)")
     parser.add_argument("--skip-preflight", action="store_true",
